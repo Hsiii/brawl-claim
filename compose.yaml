@@ -1,0 +1,16 @@
+services:
+  morning-dashboard:
+    build: .
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 768m
+    shm_size: 512mb
+    env_file:
+      - .env.local
+    ports:
+      - "3100:3100"
+    volumes:
+      - morning-dashboard-state:/app/state
+
+volumes:
+  morning-dashboard-state:

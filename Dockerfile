@@ -1,0 +1,25 @@
+FROM oven/bun:1.3.9
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+ENV HOSTNAME=0.0.0.0
+ENV PORT=3100
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile --production
+RUN bunx playwright install --with-deps chromium
+
+COPY src ./src
+COPY tsconfig.json ./tsconfig.json
+RUN mkdir -p /app/state && chown -R bun:bun /app/state
+
+USER bun
+
+EXPOSE 3100
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3100/api/health || exit 1
+
+CMD ["bun", "run", "start"]
