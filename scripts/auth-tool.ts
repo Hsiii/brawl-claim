@@ -1,15 +1,13 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, stat } from "node:fs/promises";
+import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-
-import type { Browser, BrowserContext, Page } from "playwright";
-import { chromium } from "playwright";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3199;
 const DEFAULT_AUTH_FILE = ".data/auth.json";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
 const DEFAULT_REMOTE_HOST = "oracle";
+const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_CDP_PORT = 9322;
@@ -23,6 +21,46 @@ type SourceConfig = {
   label: string;
   url: string;
   note: string;
+};
+
+type ChromeTarget = {
+  id: string;
+  title: string;
+  type: string;
+  url: string;
+  webSocketDebuggerUrl?: string;
+};
+
+type CdpCookie = {
+  name?: string;
+  value?: string;
+  domain?: string;
+  path?: string;
+  expires?: number;
+  httpOnly?: boolean;
+  secure?: boolean;
+  session?: boolean;
+  sameSite?: string;
+};
+
+type StorageState = {
+  cookies: Array<{
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    expires: number;
+    httpOnly: boolean;
+    secure: boolean;
+    sameSite: "Strict" | "Lax" | "None";
+  }>;
+  origins: Array<{
+    origin: string;
+    localStorage: Array<{
+      name: string;
+      value: string;
+    }>;
+  }>;
 };
 
 const sources: SourceConfig[] = [
@@ -78,12 +116,13 @@ const profileDir = resolve(
   process.env.AUTH_TOOL_PROFILE_DIR || DEFAULT_PROFILE_DIR,
 );
 const remoteHost = process.env.AUTH_TOOL_REMOTE_HOST || DEFAULT_REMOTE_HOST;
+const chromeAppName =
+  process.env.AUTH_TOOL_CHROME_APP_NAME || DEFAULT_CHROME_APP_NAME;
 const chromePath = process.env.AUTH_TOOL_CHROME_PATH || DEFAULT_CHROME_PATH;
 const cdpPort = Number(process.env.AUTH_TOOL_CDP_PORT || DEFAULT_CDP_PORT);
 
-let browser: Browser | undefined;
-let context: BrowserContext | undefined;
 let chromeProcess: ReturnType<typeof Bun.spawn> | undefined;
+let chromeLauncher = "not-started";
 
 function escapeHtml(value: string) {
   return value
@@ -114,37 +153,51 @@ function assertAuthorized(request: Request) {
   return true;
 }
 
-async function getContext() {
-  if (context) {
-    return context;
-  }
-
+async function ensureChrome() {
   await mkdir(profileDir, { recursive: true });
-  chromeProcess = Bun.spawn(
-    [
-      chromePath,
-      `--remote-debugging-port=${cdpPort}`,
-      `--user-data-dir=${profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--new-window",
-      "about:blank",
-    ],
-    {
+  const chromeArgs = [
+    `--remote-debugging-port=${cdpPort}`,
+    `--user-data-dir=${profileDir}`,
+    "--remote-allow-origins=*",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--new-window",
+    "about:blank",
+  ];
+
+  if (await isChromeDebugEndpointReady()) {
+    chromeLauncher = "existing-cdp";
+  } else if (
+    process.platform === "darwin" &&
+    !process.env.AUTH_TOOL_CHROME_PATH
+  ) {
+    chromeLauncher = "macos-open";
+    chromeProcess = Bun.spawn(
+      ["open", "-na", chromeAppName, "--args", ...chromeArgs],
+      {
+        stdout: "ignore",
+        stderr: "ignore",
+      },
+    );
+  } else {
+    chromeLauncher = "chrome-path";
+    chromeProcess = Bun.spawn([chromePath, ...chromeArgs], {
       stdout: "ignore",
       stderr: "ignore",
-    },
-  );
-
-  await waitForChromeDebugEndpoint();
-  browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
-  context = browser.contexts()[0];
-
-  if (!context) {
-    throw new Error("Chrome opened, but no browser context was available.");
+    });
   }
 
-  return context;
+  await waitForChromeDebugEndpoint();
+}
+
+async function isChromeDebugEndpointReady() {
+  try {
+    const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
+
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 async function waitForChromeDebugEndpoint() {
@@ -170,27 +223,323 @@ async function waitForChromeDebugEndpoint() {
   );
 }
 
+async function chromeJson<T>(path: string, init?: RequestInit) {
+  const response = await fetch(`http://127.0.0.1:${cdpPort}${path}`, init);
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(
+      `Chrome DevTools request failed: ${response.status} ${text}`.trim(),
+    );
+  }
+
+  return (text ? JSON.parse(text) : null) as T;
+}
+
+async function getBrowserWebSocketUrl() {
+  const version = await chromeJson<{ webSocketDebuggerUrl?: string }>(
+    "/json/version",
+  );
+
+  if (!version.webSocketDebuggerUrl) {
+    throw new Error("Chrome DevTools did not expose a browser WebSocket URL.");
+  }
+
+  return version.webSocketDebuggerUrl;
+}
+
+async function listChromeTargets() {
+  return chromeJson<ChromeTarget[]>("/json/list");
+}
+
+async function activateChromeTarget(targetId: string) {
+  await fetch(`http://127.0.0.1:${cdpPort}/json/activate/${targetId}`).catch(
+    () => undefined,
+  );
+}
+
+async function createChromeTarget(url: string) {
+  const target = await chromeJson<ChromeTarget>(
+    `/json/new?${encodeURIComponent(url)}`,
+    { method: "PUT" },
+  );
+  await activateChromeTarget(target.id);
+
+  return target;
+}
+
+class CdpConnection {
+  private nextId = 1;
+  private pending = new Map<
+    number,
+    {
+      reject: (error: Error) => void;
+      resolve: (value: unknown) => void;
+      timeout: ReturnType<typeof setTimeout>;
+    }
+  >();
+
+  private constructor(private readonly ws: WebSocket) {
+    this.ws.onmessage = (event) => {
+      const message = JSON.parse(String(event.data)) as {
+        id?: number;
+        result?: unknown;
+        error?: { message?: string };
+      };
+
+      if (!message.id || !this.pending.has(message.id)) {
+        return;
+      }
+
+      const request = this.pending.get(message.id);
+
+      if (!request) {
+        return;
+      }
+
+      clearTimeout(request.timeout);
+      this.pending.delete(message.id);
+
+      if (message.error) {
+        request.reject(
+          new Error(message.error.message || "Chrome DevTools call failed."),
+        );
+        return;
+      }
+
+      request.resolve(message.result);
+    };
+    this.ws.onclose = () => {
+      for (const [id, request] of this.pending) {
+        clearTimeout(request.timeout);
+        request.reject(new Error("Chrome DevTools WebSocket closed."));
+        this.pending.delete(id);
+      }
+    };
+  }
+
+  static connect(url: string) {
+    return new Promise<CdpConnection>((resolve, reject) => {
+      const ws = new WebSocket(url);
+      const timeout = setTimeout(() => {
+        reject(new Error(`Timed out connecting to Chrome DevTools at ${url}`));
+        ws.close();
+      }, 10_000);
+
+      ws.onopen = () => {
+        clearTimeout(timeout);
+        resolve(new CdpConnection(ws));
+      };
+      ws.onerror = () => {
+        clearTimeout(timeout);
+        reject(new Error(`Could not connect to Chrome DevTools at ${url}`));
+      };
+    });
+  }
+
+  call<T>(method: string, params: Record<string, unknown> = {}) {
+    return new Promise<T>((resolve, reject) => {
+      const id = this.nextId;
+      this.nextId += 1;
+      const timeout = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Chrome DevTools call timed out: ${method}`));
+      }, 10_000);
+
+      this.pending.set(id, {
+        reject,
+        resolve: (value) => resolve(value as T),
+        timeout,
+      });
+      this.ws.send(
+        JSON.stringify({
+          id,
+          method,
+          params,
+        }),
+      );
+    });
+  }
+
+  close() {
+    this.ws.close();
+  }
+}
+
+async function navigateTarget(target: ChromeTarget, url: string) {
+  if (!target.webSocketDebuggerUrl) {
+    return createChromeTarget(url);
+  }
+
+  const cdp = await CdpConnection.connect(target.webSocketDebuggerUrl);
+
+  try {
+    await cdp.call("Page.enable").catch(() => undefined);
+    await cdp.call("Page.navigate", { url });
+    await activateChromeTarget(target.id);
+
+    return {
+      ...target,
+      title: url,
+      url,
+    };
+  } finally {
+    cdp.close();
+  }
+}
+
 async function openSource(source: SourceConfig) {
-  const activeContext = await getContext();
-  const page = await activeContext.newPage();
+  await ensureChrome();
 
-  await page.goto(source.url, {
-    waitUntil: "domcontentloaded",
-    timeout: 45_000,
-  });
+  const blankTarget = (await listChromeTargets()).find(
+    (target) => target.type === "page" && target.url === "about:blank",
+  );
 
-  return page;
+  return blankTarget
+    ? navigateTarget(blankTarget, source.url)
+    : createChromeTarget(source.url);
 }
 
 async function listPages() {
-  if (!context) {
+  if (!(await isChromeDebugEndpointReady())) {
     return [];
   }
 
-  return context.pages().map((page: Page) => ({
-    title: page.url() === "about:blank" ? "Blank" : page.url(),
-    url: page.url(),
-  }));
+  return (await listChromeTargets())
+    .filter((target) => target.type === "page")
+    .map((target) => ({
+      title:
+        target.title || (target.url === "about:blank" ? "Blank" : target.url),
+      url: target.url,
+    }));
+}
+
+function normalizeSameSite(value: string | undefined) {
+  if (value === "Strict" || value === "None") {
+    return value;
+  }
+
+  return "Lax";
+}
+
+function normalizeCookie(cookie: CdpCookie) {
+  if (!cookie.name || !cookie.domain || !cookie.path) {
+    return undefined;
+  }
+
+  return {
+    name: cookie.name,
+    value: cookie.value ?? "",
+    domain: cookie.domain,
+    path: cookie.path,
+    expires: cookie.session ? -1 : cookie.expires ?? -1,
+    httpOnly: Boolean(cookie.httpOnly),
+    secure: Boolean(cookie.secure),
+    sameSite: normalizeSameSite(cookie.sameSite),
+  };
+}
+
+function localStorageEntries(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((entry) => {
+      if (
+        !entry ||
+        typeof entry !== "object" ||
+        !("name" in entry) ||
+        !("value" in entry)
+      ) {
+        return undefined;
+      }
+
+      return {
+        name: String(entry.name),
+        value: String(entry.value),
+      };
+    })
+    .filter((entry): entry is { name: string; value: string } =>
+      Boolean(entry),
+    );
+}
+
+async function readOpenTargetLocalStorage() {
+  const origins = new Map<string, StorageState["origins"][number]>();
+  const targets = (await listChromeTargets()).filter(
+    (target) =>
+      target.type === "page" &&
+      target.webSocketDebuggerUrl &&
+      /^https?:\/\//.test(target.url),
+  );
+
+  for (const target of targets) {
+    const origin = new URL(target.url).origin;
+
+    if (origins.has(origin) || !target.webSocketDebuggerUrl) {
+      continue;
+    }
+
+    const cdp = await CdpConnection.connect(target.webSocketDebuggerUrl);
+
+    try {
+      const result = await cdp.call<{ result?: { value?: unknown } }>(
+        "Runtime.evaluate",
+        {
+          expression: `(() => {
+            const entries = [];
+            for (let index = 0; index < localStorage.length; index += 1) {
+              const name = localStorage.key(index);
+              if (name) {
+                entries.push({ name, value: localStorage.getItem(name) || "" });
+              }
+            }
+            return entries;
+          })()`,
+          returnByValue: true,
+        },
+      );
+      const localStorage = localStorageEntries(result.result?.value);
+
+      if (localStorage.length > 0) {
+        origins.set(origin, {
+          origin,
+          localStorage,
+        });
+      }
+    } finally {
+      cdp.close();
+    }
+  }
+
+  return [...origins.values()].sort((a, b) =>
+    a.origin.localeCompare(b.origin),
+  );
+}
+
+async function readChromeStorageState(): Promise<StorageState> {
+  await ensureChrome();
+
+  const cdp = await CdpConnection.connect(await getBrowserWebSocketUrl());
+
+  try {
+    const result = await cdp.call<{ cookies?: CdpCookie[] }>(
+      "Storage.getCookies",
+    );
+    const cookies = (result.cookies ?? [])
+      .map(normalizeCookie)
+      .filter((cookie): cookie is StorageState["cookies"][number] =>
+        Boolean(cookie),
+      );
+
+    return {
+      cookies,
+      origins: await readOpenTargetLocalStorage(),
+    };
+  } finally {
+    cdp.close();
+  }
 }
 
 async function readAuthSummary() {
@@ -225,12 +574,10 @@ async function readAuthSummary() {
 }
 
 async function saveAuthState() {
-  const activeContext = await getContext();
+  const storageState = await readChromeStorageState();
 
   await mkdir(dirname(authFile), { recursive: true });
-  await activeContext.storageState({
-    path: authFile,
-  });
+  await writeFile(authFile, `${JSON.stringify(storageState, null, 2)}\n`);
   await chmod(authFile, 0o600);
 
   return readAuthSummary();
@@ -299,6 +646,22 @@ rm -f ${REMOTE_TMP_AUTH_FILE}
     remoteAuthFile: REMOTE_AUTH_FILE,
     dashboardUrl: DASHBOARD_URL,
   };
+}
+
+async function closeChrome() {
+  if (await isChromeDebugEndpointReady()) {
+    const cdp = await CdpConnection.connect(await getBrowserWebSocketUrl());
+
+    try {
+      await cdp.call("Browser.close").catch(() => undefined);
+    } finally {
+      cdp.close();
+    }
+  }
+
+  chromeProcess?.kill();
+  chromeProcess = undefined;
+  chromeLauncher = "not-started";
 }
 
 function renderPage() {
@@ -421,7 +784,7 @@ function renderPage() {
     <header>
       <div>
         <h1>Morning Auth Setup</h1>
-        <p>Local-only tool. Log in in the Playwright browser, save storage, then upload to Oracle.</p>
+        <p>Local-only tool. Log in in the dedicated Chrome auth profile, save storage, then upload to Oracle.</p>
       </div>
       <a href="${DASHBOARD_URL}">Dashboard</a>
     </header>
@@ -533,11 +896,16 @@ async function handleRequest(request: Request) {
 
   try {
     if (request.method === "GET" && url.pathname === "/api/status") {
+      const browserOpen = await isChromeDebugEndpointReady();
+
       return json({
-        browserOpen: Boolean(context),
-        pages: await listPages(),
+        browserOpen,
+        pages: browserOpen ? await listPages() : [],
         auth: await readAuthSummary(),
+        chromeAppName,
         chromePath,
+        chromeLauncher,
+        profileDir,
         cdpPort,
         remoteHost,
       });
@@ -583,11 +951,7 @@ async function handleRequest(request: Request) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/close") {
-      await browser?.close().catch(() => undefined);
-      chromeProcess?.kill();
-      browser = undefined;
-      context = undefined;
-      chromeProcess = undefined;
+      await closeChrome();
 
       return json({
         closed: true,
@@ -617,7 +981,6 @@ console.log(`Morning auth setup listening at ${toolUrl}`);
 console.log("This server is bound to localhost and uses a one-time URL token.");
 
 process.on("SIGINT", async () => {
-  await browser?.close().catch(() => undefined);
-  chromeProcess?.kill();
+  await closeChrome().catch(() => undefined);
   process.exit(0);
 });
