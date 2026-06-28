@@ -584,7 +584,7 @@ async function collectFacebookNotifications(
 ): Promise<DashboardSection> {
   await goto(page, sourceMeta.facebook.sourceUrl);
 
-  await clickFirstVisible(page, [
+  const clickedNotifications = await clickFirstVisible(page, [
     '[aria-label="Notifications"][role="button"]',
     '[aria-label="通知"][role="button"]',
     'div[role="button"][aria-label*="Notifications"]',
@@ -594,14 +594,39 @@ async function collectFacebookNotifications(
   ]);
   await page.waitForTimeout(2_000);
 
+  if (!clickedNotifications) {
+    const imageUrl = await screenshotTarget({
+      config,
+      filename: "facebook-notifications.png",
+      page,
+      selectors: ["body"],
+    });
+
+    return section({
+      id: "facebook",
+      status: "config",
+      imageUrl,
+      message:
+        "Could not find the notifications button. Saved Playwright auth state is probably missing or expired.",
+    });
+  }
+
   const panel =
     (await firstVisibleLocator(page, [
       'div[role="dialog"]',
       '[aria-label="Notifications"]',
       '[aria-label="通知"]',
       '[role="main"]',
-      "body",
-    ])) ?? page.locator("body");
+    ])) ?? undefined;
+
+  if (!panel) {
+    return section({
+      id: "facebook",
+      status: "empty",
+      message: "Notifications panel did not open.",
+    });
+  }
+
   const links = await extractLinksFromLocator(panel, 12);
   const imageUrl = await screenshotTarget({
     config,
