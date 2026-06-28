@@ -24,6 +24,9 @@ type AppConfig = {
   screenshotDir: string;
   authStateFile?: string;
   refreshToken?: string;
+  publicBasePath: string;
+  accessUsername?: string;
+  accessPassword?: string;
   supercellRewardEnabled: boolean;
   supercellRewardSelectors: string[];
   targets: FeedTarget[];
@@ -104,6 +107,8 @@ function parseTargets(value: string | undefined): FeedTarget[] {
 }
 
 function getConfig(): AppConfig {
+  const publicBasePath = normalizeBasePath(process.env.MORNING_PUBLIC_BASE_PATH);
+
   return {
     captureEnabled: parseBoolean(process.env.MORNING_CAPTURE_ENABLED, true),
     intervalMs:
@@ -114,6 +119,9 @@ function getConfig(): AppConfig {
       process.env.MORNING_SCREENSHOT_DIR?.trim() || DEFAULT_SCREENSHOT_DIR,
     authStateFile: process.env.MORNING_AUTH_STATE_FILE?.trim() || undefined,
     refreshToken: process.env.MORNING_REFRESH_TOKEN?.trim() || undefined,
+    publicBasePath,
+    accessUsername: process.env.MORNING_ACCESS_USERNAME?.trim() || undefined,
+    accessPassword: process.env.MORNING_ACCESS_PASSWORD?.trim() || undefined,
     supercellRewardEnabled: parseBoolean(
       process.env.MORNING_SUPERCELL_REWARD_ENABLED,
       false,
@@ -127,6 +135,16 @@ function getConfig(): AppConfig {
       .filter(Boolean),
     targets: parseTargets(process.env.MORNING_TARGETS),
   };
+}
+
+function normalizeBasePath(value: string | undefined) {
+  const trimmed = value?.trim();
+
+  if (!trimmed || trimmed === "/") {
+    return "";
+  }
+
+  return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
 }
 
 function slugify(value: string) {
@@ -248,7 +266,7 @@ async function captureTarget({
       slug,
       status: "ok",
       capturedAt,
-      imageUrl: `/assets/${slug}.png`,
+      imageUrl: `${config.publicBasePath}/assets/${slug}.png`,
       title,
       rewardAttempted,
       rewardCollected,
@@ -337,7 +355,49 @@ function isRefreshAuthorized(request: Request, config: AppConfig) {
   return request.headers.get("authorization") === `Bearer ${config.refreshToken}`;
 }
 
-function renderDashboard(current: CaptureMetadata) {
+function getBasicAuthCredentials(request: Request) {
+  const authorization = request.headers.get("authorization");
+
+  if (!authorization?.startsWith("Basic ")) {
+    return null;
+  }
+
+  const decoded = atob(authorization.slice("Basic ".length));
+  const separatorIndex = decoded.indexOf(":");
+
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  return {
+    username: decoded.slice(0, separatorIndex),
+    password: decoded.slice(separatorIndex + 1),
+  };
+}
+
+function isAccessAuthorized(request: Request, config: AppConfig) {
+  if (!config.accessUsername || !config.accessPassword) {
+    return true;
+  }
+
+  const credentials = getBasicAuthCredentials(request);
+
+  return (
+    credentials?.username === config.accessUsername &&
+    credentials.password === config.accessPassword
+  );
+}
+
+function unauthorizedResponse() {
+  return new Response("Unauthorized", {
+    status: 401,
+    headers: {
+      "www-authenticate": 'Basic realm="Morning Dashboard"',
+    },
+  });
+}
+
+function renderDashboard(current: CaptureMetadata, config: AppConfig) {
   const cards = current.results
     .map((result) => {
       const image = result.imageUrl
@@ -504,8 +564,8 @@ function renderDashboard(current: CaptureMetadata) {
         <p class="subtle">${current.capturing ? "Capture running" : "Last updated"}${current.lastRunFinishedAt ? ` ${escapeHtml(new Date(current.lastRunFinishedAt).toLocaleString())}` : ""}</p>
       </div>
       <div class="actions">
-        <a href="/api/screenshots">JSON</a>
-        <form method="post" action="/api/refresh"><button type="submit">Refresh</button></form>
+        <a href="${config.publicBasePath}/api/screenshots">JSON</a>
+        <form method="post" action="${config.publicBasePath}/api/refresh"><button type="submit">Refresh</button></form>
       </div>
     </header>
     <section class="grid">${cards || '<p class="subtle">No screenshots captured yet.</p>'}</section>
@@ -517,16 +577,26 @@ function renderDashboard(current: CaptureMetadata) {
 async function handleRequest(request: Request) {
   const config = getConfig();
   const url = new URL(request.url);
+  const pathname =
+    config.publicBasePath && url.pathname.startsWith(`${config.publicBasePath}/`)
+      ? url.pathname.slice(config.publicBasePath.length)
+      : url.pathname === config.publicBasePath
+        ? "/"
+        : url.pathname;
 
-  if (request.method === "GET" && url.pathname === "/api/health") {
+  if (request.method === "GET" && pathname === "/api/health") {
     return jsonResponse({ ok: true });
   }
 
-  if (request.method === "GET" && url.pathname === "/api/screenshots") {
+  if (!isAccessAuthorized(request, config)) {
+    return unauthorizedResponse();
+  }
+
+  if (request.method === "GET" && pathname === "/api/screenshots") {
     return jsonResponse(await getMetadata());
   }
 
-  if (request.method === "POST" && url.pathname === "/api/refresh") {
+  if (request.method === "POST" && pathname === "/api/refresh") {
     if (!isRefreshAuthorized(request, config)) {
       return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
     }
@@ -541,8 +611,8 @@ async function handleRequest(request: Request) {
     return jsonResponse({ ok: true, metadata: nextMetadata });
   }
 
-  if (request.method === "GET" && url.pathname.startsWith("/assets/")) {
-    const slug = url.pathname.slice("/assets/".length).replace(/\.png$/, "");
+  if (request.method === "GET" && pathname.startsWith("/assets/")) {
+    const slug = pathname.slice("/assets/".length).replace(/\.png$/, "");
     const file = Bun.file(join(config.screenshotDir, `${slugify(slug)}.png`));
 
     if (!(await file.exists())) {
@@ -557,8 +627,8 @@ async function handleRequest(request: Request) {
     });
   }
 
-  if (request.method === "GET" && url.pathname === "/") {
-    return new Response(renderDashboard(await getMetadata()), {
+  if (request.method === "GET" && pathname === "/") {
+    return new Response(renderDashboard(await getMetadata(), config), {
       headers: {
         "content-type": "text/html; charset=utf-8",
       },

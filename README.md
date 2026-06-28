@@ -17,6 +17,10 @@ bun run dev
 
 Open `http://localhost:3100`.
 
+Set `MORNING_ACCESS_USERNAME` and `MORNING_ACCESS_PASSWORD` before exposing the
+server on a public domain. When both are set, every dashboard and API route
+requires browser Basic Auth.
+
 ## Auth state
 
 Most feed sites are useful only when logged in. Save a Playwright storage state
@@ -69,3 +73,9 @@ docker compose up -d --build
 ```
 
 The dashboard listens on port `3100`.
+
+For a subpath deployment such as `https://bot.hsichen.dev/morning/`, set:
+
+```env
+MORNING_PUBLIC_BASE_PATH=/morning
+```
