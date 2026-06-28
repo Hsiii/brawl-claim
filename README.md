@@ -1,10 +1,12 @@
 # Morning Dashboard
 
-A personal Playwright screenshot dashboard for the sites opened by Homepage's
-`/feeds` command.
+A personal feed digest dashboard. It uses Playwright to collect the parts of
+sites that are useful at a glance: timeline links, notification links, DM list
+previews, recommendation cards, and targeted screenshots.
 
-The app runs as a small Bun server. It captures screenshots on startup and on an
-interval, stores them under `.data/screenshots`, and renders them at `/`.
+The app runs as a small Bun server. It collects on startup and on an interval,
+stores JSON plus screenshots under `.data/screenshots`, and renders the digest
+at `/`.
 
 ## Setup
 
@@ -21,7 +23,25 @@ Set `MORNING_ACCESS_USERNAME` and `MORNING_ACCESS_PASSWORD` before exposing the
 server on a public domain. When both are set, every dashboard and API route
 requires browser Basic Auth.
 
-## Auth state
+## Sources
+
+Default sources are:
+
+- X: screenshots the logged-in timeline and extracts 12 visible post links.
+- Instagram: clicks the DM/inbox entry and screenshots the DM list preview only.
+- Messenger: screenshots the chat list preview only.
+- Facebook: opens notifications and extracts visible notification links.
+- Anigamer: opens/reads the notification panel and extracts notification links.
+- Supercell Store: checks the top section for a reward button and screenshots
+  the store top area.
+- YouTube: extracts the top 6 visible home recommendation links.
+
+GitHub and Chrome Web Store are intentionally skipped.
+
+Every section includes a source link. Open it from your Mac to use your normal
+already-logged-in Chrome session.
+
+## Auth State
 
 Most feed sites are useful only when logged in. Save a Playwright storage state
 after logging in:
@@ -32,6 +52,9 @@ bunx playwright codegen --save-storage=.data/auth.json https://www.instagram.com
 
 Use the same browser session to log into the other sites you care about before
 closing the codegen browser. Set `MORNING_AUTH_STATE_FILE=.data/auth.json`.
+
+On Oracle, save the auth state to the mounted state path, for example
+`/app/state/auth.json`, then set `MORNING_AUTH_STATE_FILE=/app/state/auth.json`.
 
 ## Manual refresh
 

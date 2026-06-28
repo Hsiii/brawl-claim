@@ -1,74 +1,112 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { Browser, Page } from "playwright";
+import type { Browser, Locator, Page } from "playwright";
 import { chromium } from "playwright";
 
 const DEFAULT_PORT = 3100;
-const DEFAULT_SCREENSHOT_DIR = ".data/screenshots";
-const DEFAULT_CAPTURE_INTERVAL_MINUTES = 180;
-const CAPTURE_TIMEOUT_MS = 45_000;
+const DEFAULT_DATA_DIR = ".data/dashboard";
+const DEFAULT_COLLECT_INTERVAL_MINUTES = 180;
+const DEFAULT_ENABLED_SOURCES = [
+  "x",
+  "instagram",
+  "messenger",
+  "facebook",
+  "anigamer",
+  "supercell",
+  "youtube",
+] as const;
+const ACTION_TIMEOUT_MS = 8_000;
+const NAVIGATION_TIMEOUT_MS = 30_000;
+const SOURCE_TIMEOUT_MS = 60_000;
 const VIEWPORT_WIDTH = 1440;
-const VIEWPORT_HEIGHT = 900;
-const METADATA_FILE = "metadata.json";
+const VIEWPORT_HEIGHT = 1000;
+const STATE_FILE = "dashboard.json";
 
-type FeedTarget = {
-  name: string;
+type SourceId = (typeof DEFAULT_ENABLED_SOURCES)[number];
+
+type DashboardItem = {
+  title: string;
   url: string;
-  collectDailyReward?: boolean;
+  subtitle?: string;
+  summary?: string;
+  timestamp?: string;
+};
+
+type DashboardSection = {
+  id: SourceId;
+  title: string;
+  sourceUrl: string;
+  status: "ok" | "empty" | "error" | "config";
+  collectedAt: string;
+  items: DashboardItem[];
+  imageUrl?: string;
+  message?: string;
+};
+
+type DashboardState = {
+  collecting: boolean;
+  lastRunStartedAt?: string;
+  lastRunFinishedAt?: string;
+  sections: DashboardSection[];
 };
 
 type AppConfig = {
-  captureEnabled: boolean;
-  intervalMs: number;
-  screenshotDir: string;
-  authStateFile?: string;
-  refreshToken?: string;
-  publicBasePath: string;
-  accessUsername?: string;
   accessPassword?: string;
+  accessUsername?: string;
+  authStateFile?: string;
+  collectEnabled: boolean;
+  dataDir: string;
+  enabledSources: Set<SourceId>;
+  intervalMs: number;
+  publicBasePath: string;
+  refreshToken?: string;
   supercellRewardEnabled: boolean;
   supercellRewardSelectors: string[];
-  targets: FeedTarget[];
 };
 
-type CaptureResult = {
-  name: string;
+type LinkCandidate = {
+  title: string;
   url: string;
-  slug: string;
-  status: "ok" | "error";
-  capturedAt: string;
-  imageUrl?: string;
-  title?: string;
-  error?: string;
-  rewardAttempted?: boolean;
-  rewardCollected?: boolean;
+  subtitle?: string;
 };
 
-type CaptureMetadata = {
-  capturing: boolean;
-  lastRunStartedAt?: string;
-  lastRunFinishedAt?: string;
-  results: CaptureResult[];
-};
+const sourceMeta = {
+  anigamer: {
+    title: "Anigamer Notifications",
+    sourceUrl: "https://ani.gamer.com.tw/",
+  },
+  facebook: {
+    title: "Facebook Notifications",
+    sourceUrl: "https://www.facebook.com/",
+  },
+  instagram: {
+    title: "Instagram DM Preview",
+    sourceUrl: "https://www.instagram.com/direct/inbox/",
+  },
+  messenger: {
+    title: "Messenger Preview",
+    sourceUrl: "https://www.messenger.com/",
+  },
+  supercell: {
+    title: "Supercell Store Reward",
+    sourceUrl: "https://store.supercell.com/brawlstars",
+  },
+  x: {
+    title: "X Timeline",
+    sourceUrl: "https://twitter.com/home",
+  },
+  youtube: {
+    title: "YouTube Recommendations",
+    sourceUrl: "https://www.youtube.com/",
+  },
+} satisfies Record<SourceId, { title: string; sourceUrl: string }>;
 
-const defaultTargets = [
-  ["Instagram", "https://www.instagram.com/"],
-  ["Messenger", "https://www.messenger.com/"],
-  ["Twitter", "https://twitter.com/home"],
-  ["Facebook", "https://zh-tw.facebook.com/"],
-  ["GitHub", "https://github.com/"],
-  ["Crx", "https://chrome.google.com/webstore/devconsole/"],
-  ["YouTube", "https://www.youtube.com/"],
-  ["Anigamer", "https://ani.gamer.com.tw/"],
-  ["Supercell Store", "https://store.supercell.com/brawlstars"],
-] as const;
-
-let metadata: CaptureMetadata = {
-  capturing: false,
-  results: [],
+let dashboardState: DashboardState = {
+  collecting: false,
+  sections: [],
 };
-let activeCapture: Promise<CaptureMetadata> | null = null;
+let activeCollection: Promise<DashboardState> | null = null;
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
   if (value === undefined || value.trim() === "") {
@@ -76,65 +114,6 @@ function parseBoolean(value: string | undefined, fallback: boolean) {
   }
 
   return value === "true";
-}
-
-function parseTargets(value: string | undefined): FeedTarget[] {
-  if (!value?.trim()) {
-    return defaultTargets.map(([name, url]) => ({
-      name,
-      url,
-      collectDailyReward: name === "Supercell Store",
-    }));
-  }
-
-  const parsed = JSON.parse(value) as FeedTarget[];
-
-  if (!Array.isArray(parsed)) {
-    throw new Error("MORNING_TARGETS must be a JSON array.");
-  }
-
-  return parsed.map((target) => {
-    if (!target.name?.trim() || !target.url?.trim()) {
-      throw new Error("Each MORNING_TARGETS item needs name and url.");
-    }
-
-    return {
-      name: target.name.trim(),
-      url: target.url.trim(),
-      collectDailyReward: target.collectDailyReward === true,
-    };
-  });
-}
-
-function getConfig(): AppConfig {
-  const publicBasePath = normalizeBasePath(process.env.MORNING_PUBLIC_BASE_PATH);
-
-  return {
-    captureEnabled: parseBoolean(process.env.MORNING_CAPTURE_ENABLED, true),
-    intervalMs:
-      Number(process.env.MORNING_CAPTURE_INTERVAL_MINUTES) *
-        60 *
-        1000 || DEFAULT_CAPTURE_INTERVAL_MINUTES * 60 * 1000,
-    screenshotDir:
-      process.env.MORNING_SCREENSHOT_DIR?.trim() || DEFAULT_SCREENSHOT_DIR,
-    authStateFile: process.env.MORNING_AUTH_STATE_FILE?.trim() || undefined,
-    refreshToken: process.env.MORNING_REFRESH_TOKEN?.trim() || undefined,
-    publicBasePath,
-    accessUsername: process.env.MORNING_ACCESS_USERNAME?.trim() || undefined,
-    accessPassword: process.env.MORNING_ACCESS_PASSWORD?.trim() || undefined,
-    supercellRewardEnabled: parseBoolean(
-      process.env.MORNING_SUPERCELL_REWARD_ENABLED,
-      false,
-    ),
-    supercellRewardSelectors: (
-      process.env.MORNING_SUPERCELL_REWARD_SELECTORS ||
-      'button:has-text("Claim"),button:has-text("Collect"),text=Claim,text=Collect'
-    )
-      .split(",")
-      .map((selector) => selector.trim())
-      .filter(Boolean),
-    targets: parseTargets(process.env.MORNING_TARGETS),
-  };
 }
 
 function normalizeBasePath(value: string | undefined) {
@@ -147,12 +126,65 @@ function normalizeBasePath(value: string | undefined) {
   return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
 }
 
+function parseEnabledSources(value: string | undefined) {
+  const requestedSources = value?.trim()
+    ? value.split(",").map((source) => source.trim().toLowerCase())
+    : DEFAULT_ENABLED_SOURCES;
+  const knownSources = new Set<string>(DEFAULT_ENABLED_SOURCES);
+
+  return new Set(
+    requestedSources.filter((source): source is SourceId =>
+      knownSources.has(source),
+    ),
+  );
+}
+
+function getConfig(): AppConfig {
+  return {
+    accessPassword: process.env.MORNING_ACCESS_PASSWORD?.trim() || undefined,
+    accessUsername: process.env.MORNING_ACCESS_USERNAME?.trim() || undefined,
+    authStateFile: process.env.MORNING_AUTH_STATE_FILE?.trim() || undefined,
+    collectEnabled: parseBoolean(process.env.MORNING_CAPTURE_ENABLED, true),
+    dataDir: process.env.MORNING_SCREENSHOT_DIR?.trim() || DEFAULT_DATA_DIR,
+    enabledSources: parseEnabledSources(process.env.MORNING_ENABLED_SOURCES),
+    intervalMs:
+      Number(process.env.MORNING_CAPTURE_INTERVAL_MINUTES) *
+        60 *
+        1000 || DEFAULT_COLLECT_INTERVAL_MINUTES * 60 * 1000,
+    publicBasePath: normalizeBasePath(process.env.MORNING_PUBLIC_BASE_PATH),
+    refreshToken: process.env.MORNING_REFRESH_TOKEN?.trim() || undefined,
+    supercellRewardEnabled: parseBoolean(
+      process.env.MORNING_SUPERCELL_REWARD_ENABLED,
+      false,
+    ),
+    supercellRewardSelectors: (
+      process.env.MORNING_SUPERCELL_REWARD_SELECTORS ||
+      'button:has-text("Claim"),button:has-text("Collect"),text=Claim,text=Collect'
+    )
+      .split(",")
+      .map((selector) => selector.trim())
+      .filter(Boolean),
+  };
+}
+
+function statePath(config = getConfig()) {
+  return join(config.dataDir, STATE_FILE);
+}
+
+function assetPath(config: AppConfig, filename: string) {
+  return join(config.dataDir, filename);
+}
+
+function assetUrl(config: AppConfig, filename: string) {
+  return `${config.publicBasePath}/assets/${encodeURIComponent(filename)}`;
+}
+
 function slugify(value: string) {
   return (
     value
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "feed"
+      .replace(/^-+|-+$/g, "") || "item"
   );
 }
 
@@ -164,15 +196,54 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;");
 }
 
-function metadataPath(config = getConfig()) {
-  return join(config.screenshotDir, METADATA_FILE);
+function compactText(value: string, maxLength = 180) {
+  const text = value.replace(/\s+/g, " ").trim();
+
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, maxLength - 1).trim()}...`;
 }
 
-async function loadMetadata(config = getConfig()) {
+function section({
+  id,
+  status,
+  items = [],
+  imageUrl,
+  message,
+}: {
+  id: SourceId;
+  status: DashboardSection["status"];
+  items?: DashboardItem[];
+  imageUrl?: string;
+  message?: string;
+}): DashboardSection {
+  return {
+    id,
+    title: sourceMeta[id].title,
+    sourceUrl: sourceMeta[id].sourceUrl,
+    status,
+    collectedAt: new Date().toISOString(),
+    items,
+    imageUrl,
+    message,
+  };
+}
+
+function errorSection(id: SourceId, error: unknown): DashboardSection {
+  return section({
+    id,
+    status: "error",
+    message: error instanceof Error ? error.message : "Unknown error",
+  });
+}
+
+async function loadDashboardState(config = getConfig()) {
   try {
-    metadata = JSON.parse(
-      await readFile(metadataPath(config), "utf8"),
-    ) as CaptureMetadata;
+    dashboardState = JSON.parse(
+      await readFile(statePath(config), "utf8"),
+    ) as DashboardState;
   } catch (error) {
     if (
       error &&
@@ -180,161 +251,619 @@ async function loadMetadata(config = getConfig()) {
       "code" in error &&
       (error as { code?: string }).code === "ENOENT"
     ) {
-      return metadata;
+      return dashboardState;
     }
 
-    console.warn("Failed to read screenshot metadata:", error);
+    console.warn("Failed to read dashboard state:", error);
   }
 
-  return metadata;
+  return dashboardState;
 }
 
-async function saveMetadata(
-  nextMetadata: CaptureMetadata,
+async function saveDashboardState(
+  nextState: DashboardState,
   config = getConfig(),
 ) {
-  await mkdir(dirname(metadataPath(config)), { recursive: true });
-  await writeFile(metadataPath(config), JSON.stringify(nextMetadata, null, 2));
+  await mkdir(dirname(statePath(config)), { recursive: true });
+  await writeFile(statePath(config), JSON.stringify(nextState, null, 2));
 }
 
-async function collectDailyReward({
-  page,
-  selectors,
-}: {
-  page: Page;
-  selectors: string[];
-}) {
-  for (const selector of selectors) {
-    try {
-      await page.locator(selector).first().click({ timeout: 3_000 });
-      await page.waitForLoadState("networkidle", { timeout: 8_000 });
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+) {
+  let timeout: Timer | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
 
-      return true;
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+async function goto(page: Page, url: string) {
+  await page.goto(url, {
+    waitUntil: "domcontentloaded",
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+  await page.waitForTimeout(2_000);
+}
+
+async function clickFirstVisible(page: Page, selectors: string[]) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+
+    try {
+      if (await locator.isVisible({ timeout: 1_500 })) {
+        await locator.click({ timeout: ACTION_TIMEOUT_MS });
+        return true;
+      }
     } catch {
-      // Store copy varies by locale and reward state.
+      // Try the next selector.
     }
   }
 
   return false;
 }
 
-async function captureTarget({
-  browser,
-  config,
-  target,
-}: {
-  browser: Browser;
-  config: AppConfig;
-  target: FeedTarget;
-}): Promise<CaptureResult> {
-  const slug = slugify(target.name);
-  const capturedAt = new Date().toISOString();
-  const context = await browser.newContext({
-    storageState: config.authStateFile,
-    viewport: {
-      width: VIEWPORT_WIDTH,
-      height: VIEWPORT_HEIGHT,
-    },
-  });
-  const page = await context.newPage();
-
-  try {
-    await page.goto(target.url, {
-      waitUntil: "networkidle",
-      timeout: CAPTURE_TIMEOUT_MS,
-    });
-
-    const rewardAttempted =
-      target.collectDailyReward && config.supercellRewardEnabled;
-    const rewardCollected = rewardAttempted
-      ? await collectDailyReward({
-          page,
-          selectors: config.supercellRewardSelectors,
-        })
-      : undefined;
-    const title = await page.title();
-
-    await mkdir(config.screenshotDir, { recursive: true });
-    await page.screenshot({
-      path: join(config.screenshotDir, `${slug}.png`),
-      fullPage: false,
-    });
-
-    return {
-      name: target.name,
-      url: target.url,
-      slug,
-      status: "ok",
-      capturedAt,
-      imageUrl: `${config.publicBasePath}/assets/${slug}.png`,
-      title,
-      rewardAttempted,
-      rewardCollected,
-    };
-  } catch (error) {
-    return {
-      name: target.name,
-      url: target.url,
-      slug,
-      status: "error",
-      capturedAt,
-      error: error instanceof Error ? error.message : "Unknown error",
-    };
-  } finally {
-    await context.close();
-  }
-}
-
-async function captureNow() {
-  const config = getConfig();
-
-  if (activeCapture) {
-    return activeCapture;
-  }
-
-  activeCapture = (async () => {
-    metadata = {
-      ...metadata,
-      capturing: true,
-      lastRunStartedAt: new Date().toISOString(),
-    };
-    await saveMetadata(metadata, config);
-
-    const browser = await chromium.launch({
-      headless: true,
-    });
-    const results: CaptureResult[] = [];
+async function firstVisibleLocator(page: Page, selectors: string[]) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
 
     try {
-      for (const target of config.targets) {
-        results.push(await captureTarget({ browser, config, target }));
+      if (await locator.isVisible({ timeout: 1_500 })) {
+        return locator;
       }
-    } finally {
-      await browser.close();
+    } catch {
+      // Try the next selector.
     }
+  }
 
-    metadata = {
-      capturing: false,
-      lastRunStartedAt: metadata.lastRunStartedAt,
-      lastRunFinishedAt: new Date().toISOString(),
-      results,
-    };
-    await saveMetadata(metadata, config);
-
-    return metadata;
-  })().finally(() => {
-    activeCapture = null;
-  });
-
-  return activeCapture;
+  return null;
 }
 
-async function getMetadata() {
-  await loadMetadata();
+async function screenshotTarget({
+  config,
+  filename,
+  page,
+  selectors,
+}: {
+  config: AppConfig;
+  filename: string;
+  page: Page;
+  selectors: string[];
+}) {
+  await mkdir(config.dataDir, { recursive: true });
+  const path = assetPath(config, filename);
+  const target = await firstVisibleLocator(page, selectors);
+
+  if (target) {
+    try {
+      await target.screenshot({ path });
+      return assetUrl(config, filename);
+    } catch {
+      // Fall back to viewport screenshot.
+    }
+  }
+
+  await page.screenshot({ path, fullPage: false });
+
+  return assetUrl(config, filename);
+}
+
+async function extractLinksFromLocator(
+  locator: Locator,
+  maxItems: number,
+): Promise<LinkCandidate[]> {
+  const rawLinks = await locator.locator("a[href]").evaluateAll(
+    (anchors, limit) =>
+      anchors
+        .map((anchor) => {
+          const element = anchor as HTMLAnchorElement;
+          const title =
+            element.innerText?.trim() ||
+            element.getAttribute("aria-label")?.trim() ||
+            element.getAttribute("title")?.trim() ||
+            "";
+
+          return {
+            title,
+            url: element.href,
+          };
+        })
+        .filter((item) => item.title && item.url)
+        .slice(0, limit * 3),
+    maxItems,
+  );
+  const seenUrls = new Set<string>();
+  const items: LinkCandidate[] = [];
+
+  for (const link of rawLinks) {
+    if (seenUrls.has(link.url)) {
+      continue;
+    }
+
+    seenUrls.add(link.url);
+    items.push({
+      title: compactText(link.title, 140),
+      url: link.url,
+    });
+
+    if (items.length >= maxItems) {
+      break;
+    }
+  }
+
+  return items;
+}
+
+async function collectWithPage(
+  browser: Browser,
+  config: AppConfig,
+  id: SourceId,
+  collect: (page: Page) => Promise<DashboardSection>,
+) {
+  return withTimeout(
+    (async () => {
+      const context = await browser.newContext({
+        storageState: config.authStateFile,
+        viewport: {
+          width: VIEWPORT_WIDTH,
+          height: VIEWPORT_HEIGHT,
+        },
+      });
+      const page = await context.newPage();
+
+      page.setDefaultTimeout(ACTION_TIMEOUT_MS);
+
+      try {
+        return await collect(page);
+      } catch (error) {
+        return errorSection(id, error);
+      } finally {
+        await context.close();
+      }
+    })(),
+    SOURCE_TIMEOUT_MS,
+    sourceMeta[id].title,
+  ).catch((error) => errorSection(id, error));
+}
+
+async function collectXTimeline(
+  page: Page,
+  config: AppConfig,
+): Promise<DashboardSection> {
+  await goto(page, sourceMeta.x.sourceUrl);
+  await page
+    .locator('article a[href*="/status/"]')
+    .first()
+    .waitFor({ timeout: 12_000 })
+    .catch(() => undefined);
+
+  const rawPosts = await page.locator("article").evaluateAll((articles) =>
+    articles.map((article) => {
+      const statusLink = article.querySelector(
+        'a[href*="/status/"]',
+      ) as HTMLAnchorElement | null;
+      const text = (article as HTMLElement).innerText?.trim() || "";
+
+      return {
+        text,
+        url: statusLink?.href || "",
+      };
+    }),
+  );
+  const seenUrls = new Set<string>();
+  const items: DashboardItem[] = [];
+
+  for (const post of rawPosts) {
+    if (!post.url || seenUrls.has(post.url)) {
+      continue;
+    }
+
+    seenUrls.add(post.url);
+    items.push({
+      title: compactText(post.text, 140) || "X post",
+      url: post.url,
+      summary: post.text,
+    });
+
+    if (items.length >= 12) {
+      break;
+    }
+  }
+
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: "x-timeline.png",
+    page,
+    selectors: ['main[role="main"]', '[data-testid="primaryColumn"]', "main"],
+  });
+
+  return section({
+    id: "x",
+    status: items.length ? "ok" : "empty",
+    imageUrl,
+    items,
+    message: items.length
+      ? "Extracted visible post links from the logged-in timeline."
+      : "No visible timeline posts found.",
+  });
+}
+
+async function collectInstagramDmPreview(
+  page: Page,
+  config: AppConfig,
+): Promise<DashboardSection> {
+  await goto(page, "https://www.instagram.com/");
+
+  const clicked = await clickFirstVisible(page, [
+    'a[href="/direct/inbox/"]',
+    'a[href*="/direct/inbox"]',
+    '[aria-label="Messenger"]',
+    '[aria-label="Direct"]',
+  ]);
+
+  if (!clicked) {
+    await goto(page, sourceMeta.instagram.sourceUrl);
+  } else {
+    await page.waitForTimeout(2_500);
+  }
+
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: "instagram-dms.png",
+    page,
+    selectors: [
+      'main[role="main"]',
+      '[role="main"]',
+      'div:has-text("Messages")',
+      "main",
+      "body",
+    ],
+  });
+
+  return section({
+    id: "instagram",
+    status: "ok",
+    imageUrl,
+    items: [
+      {
+        title: "Open Instagram inbox locally",
+        url: sourceMeta.instagram.sourceUrl,
+      },
+    ],
+    message: "Captured inbox/list preview only. No conversation rows clicked.",
+  });
+}
+
+async function collectMessengerPreview(
+  page: Page,
+  config: AppConfig,
+): Promise<DashboardSection> {
+  await goto(page, sourceMeta.messenger.sourceUrl);
+
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: "messenger-preview.png",
+    page,
+    selectors: [
+      '[aria-label="Chats"]',
+      '[aria-label="聊天"]',
+      '[role="navigation"]',
+      '[role="main"]',
+      "body",
+    ],
+  });
+
+  return section({
+    id: "messenger",
+    status: "ok",
+    imageUrl,
+    items: [
+      {
+        title: "Open Messenger locally",
+        url: sourceMeta.messenger.sourceUrl,
+      },
+    ],
+    message: "Captured chat list preview only. No chat rows clicked.",
+  });
+}
+
+async function collectFacebookNotifications(
+  page: Page,
+  config: AppConfig,
+): Promise<DashboardSection> {
+  await goto(page, sourceMeta.facebook.sourceUrl);
+
+  await clickFirstVisible(page, [
+    '[aria-label="Notifications"][role="button"]',
+    '[aria-label="通知"][role="button"]',
+    'div[role="button"][aria-label*="Notifications"]',
+    'div[role="button"][aria-label*="通知"]',
+    'a[aria-label*="Notifications"]',
+    'a[aria-label*="通知"]',
+  ]);
+  await page.waitForTimeout(2_000);
+
+  const panel =
+    (await firstVisibleLocator(page, [
+      'div[role="dialog"]',
+      '[aria-label="Notifications"]',
+      '[aria-label="通知"]',
+      '[role="main"]',
+      "body",
+    ])) ?? page.locator("body");
+  const links = await extractLinksFromLocator(panel, 12);
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: "facebook-notifications.png",
+    page,
+    selectors: [
+      'div[role="dialog"]',
+      '[aria-label="Notifications"]',
+      '[aria-label="通知"]',
+      "body",
+    ],
+  });
+
+  return section({
+    id: "facebook",
+    status: links.length ? "ok" : "empty",
+    imageUrl,
+    items: links,
+    message: links.length
+      ? "Notification links extracted without opening individual notifications."
+      : "No notification links found.",
+  });
+}
+
+async function collectAnigamerNotifications(page: Page): Promise<DashboardSection> {
+  await goto(page, sourceMeta.anigamer.sourceUrl);
+
+  await clickFirstVisible(page, [
+    'text="通知"',
+    'a:has-text("通知")',
+    'button:has-text("通知")',
+    '[aria-label*="通知"]',
+  ]);
+  await page.waitForTimeout(1_500);
+
+  const links = (await extractLinksFromLocator(page.locator("body"), 16))
+    .filter((link) =>
+      /更新|通知|站內信|公告|小時前|天前|分鐘前/.test(link.title),
+    )
+    .slice(0, 12);
+
+  return section({
+    id: "anigamer",
+    status: links.length ? "ok" : "empty",
+    items: links,
+    message: links.length
+      ? "Read notification panel links without opening each notification."
+      : "No Anigamer notifications found.",
+  });
+}
+
+async function collectSupercellReward(
+  page: Page,
+  config: AppConfig,
+): Promise<DashboardSection> {
+  await goto(page, sourceMeta.supercell.sourceUrl);
+
+  const rewardButton = await firstVisibleLocator(
+    page,
+    config.supercellRewardSelectors,
+  );
+  let rewardMessage = "No visible reward button found in the top section.";
+  let rewardCollected = false;
+
+  if (rewardButton) {
+    rewardMessage = config.supercellRewardEnabled
+      ? "Reward button found and clicked."
+      : "Reward button found. Auto-collection is disabled.";
+
+    if (config.supercellRewardEnabled) {
+      await rewardButton.click({ timeout: ACTION_TIMEOUT_MS });
+      await page.waitForTimeout(2_000);
+      rewardCollected = true;
+    }
+  }
+
+  const offers = (await extractLinksFromLocator(page.locator("body"), 8))
+    .filter((link) => link.url.includes("/product/"))
+    .slice(0, 4);
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: "supercell-top.png",
+    page,
+    selectors: ["main", "body"],
+  });
+
+  return section({
+    id: "supercell",
+    status: "ok",
+    imageUrl,
+    items: [
+      {
+        title: rewardCollected ? "Reward collected" : "Reward status",
+        url: sourceMeta.supercell.sourceUrl,
+        subtitle: rewardMessage,
+      },
+      ...offers.map((offer) => ({
+        title: offer.title,
+        url: offer.url,
+      })),
+    ],
+    message: rewardMessage,
+  });
+}
+
+async function collectYoutubeRecommendations(
+  page: Page,
+): Promise<DashboardSection> {
+  await goto(page, sourceMeta.youtube.sourceUrl);
+  await page
+    .locator("ytd-rich-item-renderer, ytd-video-renderer, a#video-title")
+    .first()
+    .waitFor({ timeout: 10_000 })
+    .catch(() => undefined);
+
+  const rawVideos = await page.locator("a#video-title").evaluateAll((anchors) =>
+    anchors.map((anchor) => {
+      const element = anchor as HTMLAnchorElement;
+
+      return {
+        title:
+          element.getAttribute("title")?.trim() || element.innerText?.trim(),
+        url: element.href,
+      };
+    }),
+  );
+  const seen = new Set<string>();
+  const items: DashboardItem[] = [];
+
+  for (const video of rawVideos) {
+    if (!video.title || !video.url || seen.has(video.url)) {
+      continue;
+    }
+
+    seen.add(video.url);
+    items.push({
+      title: compactText(video.title, 120),
+      url: video.url,
+    });
+
+    if (items.length >= 6) {
+      break;
+    }
+  }
+
+  return section({
+    id: "youtube",
+    status: items.length ? "ok" : "empty",
+    items,
+    message: items.length
+      ? "Top visible home recommendations."
+      : "No YouTube recommendations found.",
+  });
+}
+
+async function collectDashboardNow() {
+  const config = getConfig();
+
+  if (activeCollection) {
+    return activeCollection;
+  }
+
+  activeCollection = (async () => {
+    dashboardState = {
+      ...dashboardState,
+      collecting: true,
+      lastRunStartedAt: new Date().toISOString(),
+    };
+    await saveDashboardState(dashboardState, config);
+
+    const sections: DashboardSection[] = [];
+    let browser: Browser | undefined;
+    const getBrowser = async () => {
+      browser ??= await chromium.launch({
+        headless: true,
+      });
+
+      return browser;
+    };
+
+    try {
+      if (config.enabledSources.has("x")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "x", (page) =>
+            collectXTimeline(page, config),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("instagram")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "instagram", (page) =>
+            collectInstagramDmPreview(page, config),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("messenger")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "messenger", (page) =>
+            collectMessengerPreview(page, config),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("facebook")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "facebook", (page) =>
+            collectFacebookNotifications(page, config),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("anigamer")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "anigamer", (page) =>
+            collectAnigamerNotifications(page),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("supercell")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "supercell", (page) =>
+            collectSupercellReward(page, config),
+          ),
+        );
+      }
+
+      if (config.enabledSources.has("youtube")) {
+        sections.push(
+          await collectWithPage(await getBrowser(), config, "youtube", (page) =>
+            collectYoutubeRecommendations(page),
+          ),
+        );
+      }
+    } finally {
+      await browser?.close();
+    }
+
+    dashboardState = {
+      collecting: false,
+      lastRunStartedAt: dashboardState.lastRunStartedAt,
+      lastRunFinishedAt: new Date().toISOString(),
+      sections,
+    };
+    await saveDashboardState(dashboardState, config);
+
+    return dashboardState;
+  })().finally(() => {
+    activeCollection = null;
+  });
+
+  return activeCollection;
+}
+
+async function getDashboardState() {
+  await loadDashboardState();
 
   return {
-    ...metadata,
-    capturing: Boolean(activeCapture) || metadata.capturing,
+    ...dashboardState,
+    collecting: Boolean(activeCollection) || dashboardState.collecting,
   };
 }
 
@@ -397,34 +926,51 @@ function unauthorizedResponse() {
   });
 }
 
-function renderDashboard(current: CaptureMetadata, config: AppConfig) {
-  const cards = current.results
-    .map((result) => {
-      const image = result.imageUrl
-        ? `<a class="image-link" href="${escapeHtml(result.url)}"><img src="${escapeHtml(result.imageUrl)}?t=${encodeURIComponent(result.capturedAt)}" alt="${escapeHtml(result.name)} screenshot" loading="lazy"></a>`
-        : '<div class="placeholder">No screenshot</div>';
-      const reward =
-        result.rewardAttempted === true
-          ? `<span class="pill">${result.rewardCollected ? "Reward clicked" : "Reward not found"}</span>`
-          : "";
-
-      return `<article class="card">
-        <div class="card-header">
-          <div>
-            <h2>${escapeHtml(result.name)}</h2>
-            <a href="${escapeHtml(result.url)}">${escapeHtml(result.title || result.url)}</a>
-          </div>
-          <span class="status ${result.status}">${result.status}</span>
-        </div>
-        ${image}
-        <div class="meta">
-          <time datetime="${escapeHtml(result.capturedAt)}">${escapeHtml(new Date(result.capturedAt).toLocaleString())}</time>
-          ${reward}
-        </div>
-        ${result.error ? `<p class="error">${escapeHtml(result.error)}</p>` : ""}
-      </article>`;
-    })
+function renderItem(item: DashboardItem) {
+  const subtitle = [item.subtitle, item.timestamp]
+    .filter(Boolean)
+    .map((value) => `<span>${escapeHtml(value ?? "")}</span>`)
     .join("");
+  const summary = item.summary
+    ? `<p class="item-summary">${escapeHtml(compactText(item.summary, 220))}</p>`
+    : "";
+
+  return `<li class="item">
+    <a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a>
+    ${subtitle ? `<div class="item-meta">${subtitle}</div>` : ""}
+    ${summary}
+  </li>`;
+}
+
+function renderSection(currentSection: DashboardSection) {
+  const message = currentSection.message
+    ? `<p class="section-message">${escapeHtml(currentSection.message)}</p>`
+    : "";
+  const image = currentSection.imageUrl
+    ? `<a class="preview" href="${escapeHtml(currentSection.sourceUrl)}"><img src="${escapeHtml(currentSection.imageUrl)}?t=${encodeURIComponent(currentSection.collectedAt)}" alt="${escapeHtml(currentSection.title)} preview" loading="lazy"></a>`
+    : "";
+  const items = currentSection.items.length
+    ? `<ul class="items">${currentSection.items.map(renderItem).join("")}</ul>`
+    : '<p class="empty">No items.</p>';
+
+  return `<section class="section-card">
+    <div class="section-header">
+      <div>
+        <h2>${escapeHtml(currentSection.title)}</h2>
+        <a class="source-link" href="${escapeHtml(currentSection.sourceUrl)}">Open source</a>
+      </div>
+      <span class="status ${currentSection.status}">${currentSection.status}</span>
+    </div>
+    ${message}
+    ${image}
+    ${items}
+  </section>`;
+}
+
+function renderDashboard(current: DashboardState, config: AppConfig) {
+  const sections = current.sections.length
+    ? current.sections.map(renderSection).join("")
+    : '<p class="empty">No digest collected yet.</p>';
 
   return `<!doctype html>
 <html lang="en">
@@ -436,11 +982,13 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
     :root {
       --color-bg: #111315;
       --color-surface: #191b1f;
+      --color-surface-raised: #20242a;
       --color-border: #343842;
       --color-text: #edf4ef;
       --color-muted: #a5abb7;
       --color-accent: #8ab4ff;
       --color-success: #80d39b;
+      --color-warning: #f0c36a;
       --color-error: #ff8a80;
       --space-1: 4px;
       --space-2: 8px;
@@ -456,12 +1004,12 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
       margin: 0;
       background: var(--color-bg);
       color: var(--color-text);
-      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     main {
       width: min(1440px, 100%);
       margin: 0 auto;
-      padding: var(--space-8);
+      padding: var(--space-6);
     }
     header {
       display: flex;
@@ -470,9 +1018,9 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
       align-items: end;
       margin-bottom: var(--space-6);
     }
-    h1, h2, p { margin: 0; }
+    h1, h2, p, ul { margin: 0; }
     h1 { font-size: 28px; line-height: 1.2; }
-    h2 { font-size: 20px; line-height: 1.3; }
+    h2 { font-size: 18px; line-height: 1.25; }
     a { color: var(--color-accent); overflow-wrap: anywhere; }
     button {
       min-height: 40px;
@@ -484,31 +1032,39 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
       cursor: pointer;
     }
     button:hover { border-color: var(--color-accent); }
-    .subtle { color: var(--color-muted); margin-top: var(--space-2); }
+    .subtle, .empty, .section-message, .source-link {
+      color: var(--color-muted);
+    }
+    .subtle { margin-top: var(--space-2); }
     .actions {
       display: flex;
       gap: var(--space-2);
       align-items: center;
     }
-    .grid {
+    .sections {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
       gap: var(--space-4);
+      align-items: start;
     }
-    .card {
+    .section-card {
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
       background: var(--color-surface);
       overflow: hidden;
     }
-    .card-header {
-      min-height: 96px;
+    .section-header {
+      min-height: 72px;
       display: flex;
       justify-content: space-between;
       gap: var(--space-4);
       padding: var(--space-4);
+      border-bottom: 1px solid var(--color-border);
     }
-    .status, .pill {
+    .section-message {
+      padding: var(--space-3) var(--space-4) 0;
+    }
+    .status {
       height: 28px;
       display: inline-flex;
       align-items: center;
@@ -519,13 +1075,16 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
       white-space: nowrap;
     }
     .status.ok { color: var(--color-success); }
-    .status.error, .error { color: var(--color-error); }
-    .image-link, .placeholder {
+    .status.config, .status.empty { color: var(--color-warning); }
+    .status.error { color: var(--color-error); }
+    .preview {
       display: block;
-      aspect-ratio: 16 / 10;
-      border-top: 1px solid var(--color-border);
-      border-bottom: 1px solid var(--color-border);
+      aspect-ratio: 16 / 9;
+      margin: var(--space-4);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-card);
       background: var(--color-bg);
+      overflow: hidden;
     }
     img {
       width: 100%;
@@ -534,25 +1093,43 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
       object-fit: cover;
       object-position: top center;
     }
-    .placeholder {
+    .items {
+      list-style: none;
       display: grid;
-      place-items: center;
-      color: var(--color-muted);
-    }
-    .meta {
-      display: flex;
-      justify-content: space-between;
-      gap: var(--space-3);
+      gap: var(--space-2);
       padding: var(--space-4);
+    }
+    .item {
+      padding: var(--space-3);
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: var(--color-surface-raised);
+    }
+    .item > a {
+      display: block;
+      color: var(--color-text);
+      text-decoration: none;
+    }
+    .item > a:hover { color: var(--color-accent); }
+    .item-meta {
+      display: flex;
+      gap: var(--space-2);
+      flex-wrap: wrap;
+      margin-top: var(--space-1);
+      color: var(--color-muted);
+      font-size: 13px;
+    }
+    .item-summary {
+      margin-top: var(--space-2);
       color: var(--color-muted);
     }
-    .error { padding: 0 var(--space-4) var(--space-4); }
-    @media (max-width: 720px) {
+    .empty { padding: var(--space-4); }
+    @media (max-width: 760px) {
       main { padding: var(--space-4); }
-      header, .card-header, .meta { display: block; }
+      header, .section-header { display: block; }
       .actions { margin-top: var(--space-4); }
-      .grid { grid-template-columns: 1fr; }
-      .status, .pill { margin-top: var(--space-2); }
+      .sections { grid-template-columns: 1fr; }
+      .status { margin-top: var(--space-2); }
     }
   </style>
 </head>
@@ -561,14 +1138,14 @@ function renderDashboard(current: CaptureMetadata, config: AppConfig) {
     <header>
       <div>
         <h1>Morning Dashboard</h1>
-        <p class="subtle">${current.capturing ? "Capture running" : "Last updated"}${current.lastRunFinishedAt ? ` ${escapeHtml(new Date(current.lastRunFinishedAt).toLocaleString())}` : ""}</p>
+        <p class="subtle">${current.collecting ? "Collection running" : "Last updated"}${current.lastRunFinishedAt ? ` ${escapeHtml(new Date(current.lastRunFinishedAt).toLocaleString())}` : ""}</p>
       </div>
       <div class="actions">
-        <a href="${config.publicBasePath}/api/screenshots">JSON</a>
+        <a href="${config.publicBasePath}/api/dashboard">JSON</a>
         <form method="post" action="${config.publicBasePath}/api/refresh"><button type="submit">Refresh</button></form>
       </div>
     </header>
-    <section class="grid">${cards || '<p class="subtle">No screenshots captured yet.</p>'}</section>
+    <div class="sections">${sections}</div>
   </main>
 </body>
 </html>`;
@@ -592,8 +1169,11 @@ async function handleRequest(request: Request) {
     return unauthorizedResponse();
   }
 
-  if (request.method === "GET" && pathname === "/api/screenshots") {
-    return jsonResponse(await getMetadata());
+  if (
+    request.method === "GET" &&
+    (pathname === "/api/dashboard" || pathname === "/api/screenshots")
+  ) {
+    return jsonResponse(await getDashboardState());
   }
 
   if (request.method === "POST" && pathname === "/api/refresh") {
@@ -601,19 +1181,19 @@ async function handleRequest(request: Request) {
       return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
     }
 
-    const nextMetadata = await captureNow();
+    const nextState = await collectDashboardNow();
     const accept = request.headers.get("accept") || "";
 
     if (accept.includes("text/html")) {
-      return Response.redirect(new URL("/", request.url), 303);
+      return Response.redirect(new URL(config.publicBasePath || "/", request.url), 303);
     }
 
-    return jsonResponse({ ok: true, metadata: nextMetadata });
+    return jsonResponse({ ok: true, dashboard: nextState });
   }
 
   if (request.method === "GET" && pathname.startsWith("/assets/")) {
-    const slug = pathname.slice("/assets/".length).replace(/\.png$/, "");
-    const file = Bun.file(join(config.screenshotDir, `${slugify(slug)}.png`));
+    const filename = pathname.slice("/assets/".length);
+    const file = Bun.file(assetPath(config, filename));
 
     if (!(await file.exists())) {
       return new Response("Not found", { status: 404 });
@@ -628,7 +1208,7 @@ async function handleRequest(request: Request) {
   }
 
   if (request.method === "GET" && pathname === "/") {
-    return new Response(renderDashboard(await getMetadata(), config), {
+    return new Response(renderDashboard(await getDashboardState(), config), {
       headers: {
         "content-type": "text/html; charset=utf-8",
       },
@@ -641,31 +1221,31 @@ async function handleRequest(request: Request) {
 async function startScheduler() {
   const config = getConfig();
 
-  await loadMetadata(config);
+  await loadDashboardState(config);
 
-  if (!config.captureEnabled) {
+  if (!config.collectEnabled) {
     return;
   }
 
-  void captureNow().catch((error) => {
-    console.error("Screenshot capture failed:", error);
+  void collectDashboardNow().catch((error) => {
+    console.error("Dashboard collection failed:", error);
   });
 
   setInterval(() => {
-    void captureNow().catch((error) => {
-      console.error("Screenshot capture failed:", error);
+    void collectDashboardNow().catch((error) => {
+      console.error("Dashboard collection failed:", error);
     });
   }, config.intervalMs);
 
   console.log(
-    `Screenshot capture enabled every ${Math.round(
+    `Dashboard collection enabled every ${Math.round(
       config.intervalMs / 60_000,
     )} minutes.`,
   );
 }
 
 if (process.argv.includes("--capture-once")) {
-  await captureNow();
+  await collectDashboardNow();
   process.exit(0);
 }
 
