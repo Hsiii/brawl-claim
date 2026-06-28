@@ -1,0 +1,21 @@
+services:
+  morning-dashboard:
+    build: .
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 768m
+    shm_size: 512mb
+    env_file:
+      - .env.local
+    volumes:
+      - morning-dashboard-state:/app/state
+    networks:
+      - wm31bot
+
+networks:
+  wm31bot:
+    external: true
+    name: wm31bot_default
+
+volumes:
+  morning-dashboard-state:
