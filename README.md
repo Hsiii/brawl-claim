@@ -47,6 +47,17 @@ Most feed sites are useful only when logged in. Save a Playwright storage state
 after logging in:
 
 ```bash
+bun run auth:setup
+```
+
+This opens a local-only setup page and a separate Playwright browser. Log in to
+the sources there, save the storage state, then upload it to Oracle from the
+tool. The tool does not receive or display passwords; it saves cookies and
+browser storage only.
+
+You can also use Playwright directly:
+
+```bash
 bunx playwright codegen --save-storage=.data/auth.json https://www.instagram.com/
 ```
 
