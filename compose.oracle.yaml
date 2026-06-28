@@ -10,12 +10,12 @@ services:
     volumes:
       - morning-dashboard-state:/app/state
     networks:
-      - wm31bot
+      - shared
 
 networks:
-  wm31bot:
+  shared:
     external: true
-    name: wm31bot_default
+    name: bots_shared
 
 volumes:
   morning-dashboard-state:
