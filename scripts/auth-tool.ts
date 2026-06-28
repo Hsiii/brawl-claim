@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import type { BrowserContext, Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 import { chromium } from "playwright";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -10,6 +10,9 @@ const DEFAULT_PORT = 3199;
 const DEFAULT_AUTH_FILE = ".data/auth.json";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
 const DEFAULT_REMOTE_HOST = "oracle";
+const DEFAULT_CHROME_PATH =
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+const DEFAULT_CDP_PORT = 9322;
 const REMOTE_TMP_AUTH_FILE = "/tmp/morning-dashboard-auth.json";
 const REMOTE_AUTH_FILE = "/app/state/auth.json";
 const REMOTE_APP_DIR = "/home/ubuntu/bots/morning";
@@ -75,8 +78,12 @@ const profileDir = resolve(
   process.env.AUTH_TOOL_PROFILE_DIR || DEFAULT_PROFILE_DIR,
 );
 const remoteHost = process.env.AUTH_TOOL_REMOTE_HOST || DEFAULT_REMOTE_HOST;
+const chromePath = process.env.AUTH_TOOL_CHROME_PATH || DEFAULT_CHROME_PATH;
+const cdpPort = Number(process.env.AUTH_TOOL_CDP_PORT || DEFAULT_CDP_PORT);
 
+let browser: Browser | undefined;
 let context: BrowserContext | undefined;
+let chromeProcess: ReturnType<typeof Bun.spawn> | undefined;
 
 function escapeHtml(value: string) {
   return value
@@ -113,15 +120,54 @@ async function getContext() {
   }
 
   await mkdir(profileDir, { recursive: true });
-  context = await chromium.launchPersistentContext(profileDir, {
-    headless: false,
-    viewport: {
-      width: 1280,
-      height: 900,
+  chromeProcess = Bun.spawn(
+    [
+      chromePath,
+      `--remote-debugging-port=${cdpPort}`,
+      `--user-data-dir=${profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--new-window",
+      "about:blank",
+    ],
+    {
+      stdout: "ignore",
+      stderr: "ignore",
     },
-  });
+  );
+
+  await waitForChromeDebugEndpoint();
+  browser = await chromium.connectOverCDP(`http://127.0.0.1:${cdpPort}`);
+  context = browser.contexts()[0];
+
+  if (!context) {
+    throw new Error("Chrome opened, but no browser context was available.");
+  }
 
   return context;
+}
+
+async function waitForChromeDebugEndpoint() {
+  const startedAt = Date.now();
+  let lastError: unknown;
+
+  while (Date.now() - startedAt < 20_000) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`);
+
+      if (response.ok) {
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  throw new Error(
+    `Could not connect to Chrome DevTools on port ${cdpPort}. ${lastError instanceof Error ? lastError.message : ""}`.trim(),
+  );
 }
 
 async function openSource(source: SourceConfig) {
@@ -491,6 +537,8 @@ async function handleRequest(request: Request) {
         browserOpen: Boolean(context),
         pages: await listPages(),
         auth: await readAuthSummary(),
+        chromePath,
+        cdpPort,
         remoteHost,
       });
     }
@@ -535,8 +583,11 @@ async function handleRequest(request: Request) {
     }
 
     if (request.method === "POST" && url.pathname === "/api/close") {
-      await context?.close();
+      await browser?.close().catch(() => undefined);
+      chromeProcess?.kill();
+      browser = undefined;
       context = undefined;
+      chromeProcess = undefined;
 
       return json({
         closed: true,
@@ -566,6 +617,7 @@ console.log(`Morning auth setup listening at ${toolUrl}`);
 console.log("This server is bound to localhost and uses a one-time URL token.");
 
 process.on("SIGINT", async () => {
-  await context?.close();
+  await browser?.close().catch(() => undefined);
+  chromeProcess?.kill();
   process.exit(0);
 });

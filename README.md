@@ -50,10 +50,17 @@ after logging in:
 bun run auth:setup
 ```
 
-This opens a local-only setup page and a separate Playwright browser. Log in to
-the sources there, save the storage state, then upload it to Oracle from the
-tool. The tool does not receive or display passwords; it saves cookies and
-browser storage only.
+This opens a local-only setup page and launches your installed Google Chrome app
+with a separate Chrome profile controlled through DevTools. Log in to the
+sources there, save the storage state, then upload it to Oracle from the tool.
+The tool does not receive or display passwords; it saves cookies and browser
+storage only.
+
+It intentionally does not attach to your normal Chrome profile. Chrome blocks
+remote debugging against the default profile, and Playwright does not support
+automating the main Chrome data directory. The setup profile persists at
+`.data/auth-browser-profile`, so future refreshes should reuse those logins.
+Override the Chrome path with `AUTH_TOOL_CHROME_PATH` if needed.
 
 You can also use Playwright directly:
 
