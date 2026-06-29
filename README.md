@@ -114,6 +114,8 @@ docker compose up -d --build
 ```
 
 The dashboard listens on port `3100`.
+The Oracle compose file currently sets `MORNING_CAPTURE_ENABLED=false`, which
+keeps the dashboard available without running scheduled source captures.
 
 For a subpath deployment such as `https://bot.hsichen.dev/morning/`, set:
 
