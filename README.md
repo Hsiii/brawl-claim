@@ -120,6 +120,9 @@ Then deploy:
 The dashboard listens on port `3100`.
 The `oracle` Compose service currently sets `MORNING_CAPTURE_ENABLED=false`,
 which keeps the dashboard available without running scheduled source captures.
+It also skips Chromium installation at image build time. Re-enable the
+`INSTALL_PLAYWRIGHT_BROWSERS` build arg in the `oracle` repo before turning
+scheduled captures back on.
 
 For a subpath deployment such as `https://bot.hsichen.dev/morning/`, set:
 

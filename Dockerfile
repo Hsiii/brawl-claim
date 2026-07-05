@@ -6,10 +6,11 @@ ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0
 ENV PORT=3100
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ARG INSTALL_PLAYWRIGHT_BROWSERS=true
 
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
-RUN bunx playwright install --with-deps chromium
+RUN if [ "$INSTALL_PLAYWRIGHT_BROWSERS" = "true" ]; then bunx playwright install --with-deps chromium; fi
 
 COPY src ./src
 COPY tsconfig.json ./tsconfig.json
