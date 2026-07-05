@@ -7,6 +7,7 @@
     "auth:setup": "bun scripts/auth-tool.ts",
     "build": "tsc --noEmit",
     "capture": "bun src/server.ts --capture-once",
+    "deploy": "bun scripts/deploy.mjs",
     "dev": "bun --watch src/server.ts",
     "start": "bun src/server.ts"
   },
