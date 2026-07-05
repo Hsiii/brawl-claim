@@ -98,9 +98,13 @@ MORNING_SUPERCELL_REWARD_ENABLED=true
 The bot clicks the first selector from `MORNING_SUPERCELL_REWARD_SELECTORS` that
 exists. It will not bypass login challenges, captchas, or two-factor prompts.
 
-## Oracle Free deployment
+## Oracle deployment
 
-Copy `.env.example` to `.env.local` and use state paths inside `/app/state`:
+Production deployment is owned by the `oracle` runtime repo. Keep this app
+checked out on the VM at `/home/ubuntu/bots/apps/morning`, then put production
+configuration in `/home/ubuntu/bots/secrets/morning.env`.
+
+Use state paths inside `/app/state`:
 
 ```env
 MORNING_SCREENSHOT_DIR=/app/state/screenshots
@@ -110,12 +114,12 @@ MORNING_AUTH_STATE_FILE=/app/state/auth.json
 Then deploy:
 
 ```bash
-docker compose up -d --build
+/home/ubuntu/bots/oracle/scripts/deploy-morning
 ```
 
 The dashboard listens on port `3100`.
-The Oracle compose file currently sets `MORNING_CAPTURE_ENABLED=false`, which
-keeps the dashboard available without running scheduled source captures.
+The `oracle` Compose service currently sets `MORNING_CAPTURE_ENABLED=false`,
+which keeps the dashboard available without running scheduled source captures.
 
 For a subpath deployment such as `https://bot.hsichen.dev/morning/`, set:
 

@@ -13,7 +13,8 @@ const DEFAULT_CHROME_PATH =
 const DEFAULT_CDP_PORT = 9322;
 const REMOTE_TMP_AUTH_FILE = "/tmp/morning-dashboard-auth.json";
 const REMOTE_AUTH_FILE = "/app/state/auth.json";
-const REMOTE_APP_DIR = "/home/ubuntu/bots/morning";
+const REMOTE_ORACLE_DIR = "/home/ubuntu/bots/oracle";
+const REMOTE_MORNING_ENV_FILE = "/home/ubuntu/bots/secrets/morning.env";
 const DASHBOARD_URL = "https://bot.hsichen.dev/morning/";
 
 type SourceConfig = {
@@ -626,16 +627,20 @@ async function uploadAuthState() {
 
   const remoteCommand = `
 set -e
-cd ${REMOTE_APP_DIR}
-sudo docker cp ${REMOTE_TMP_AUTH_FILE} morning-morning-dashboard-1:${REMOTE_AUTH_FILE}
-sudo docker exec -u root morning-morning-dashboard-1 chown bun:bun ${REMOTE_AUTH_FILE}
-sudo docker exec -u root morning-morning-dashboard-1 chmod 600 ${REMOTE_AUTH_FILE}
-if grep -q '^MORNING_AUTH_STATE_FILE=' .env.local; then
-  sed -i 's#^MORNING_AUTH_STATE_FILE=.*#MORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}#' .env.local
-else
-  printf '\\nMORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}\\n' >> .env.local
+container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q morning-dashboard)"
+if [ -z "$container_id" ]; then
+  ${REMOTE_ORACLE_DIR}/scripts/deploy-morning
+  container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q morning-dashboard)"
 fi
-sudo docker compose -f compose.oracle.yaml -p morning up -d --force-recreate
+sudo docker cp ${REMOTE_TMP_AUTH_FILE} "$container_id:${REMOTE_AUTH_FILE}"
+sudo docker exec -u root "$container_id" chown bun:bun ${REMOTE_AUTH_FILE}
+sudo docker exec -u root "$container_id" chmod 600 ${REMOTE_AUTH_FILE}
+if grep -q '^MORNING_AUTH_STATE_FILE=' ${REMOTE_MORNING_ENV_FILE}; then
+  sed -i 's#^MORNING_AUTH_STATE_FILE=.*#MORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}#' ${REMOTE_MORNING_ENV_FILE}
+else
+  printf '\\nMORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}\\n' >> ${REMOTE_MORNING_ENV_FILE}
+fi
+${REMOTE_ORACLE_DIR}/scripts/deploy-morning
 rm -f ${REMOTE_TMP_AUTH_FILE}
 `;
 
