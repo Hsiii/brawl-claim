@@ -98,6 +98,16 @@ MORNING_SUPERCELL_REWARD_ENABLED=true
 The bot clicks the first selector from `MORNING_SUPERCELL_REWARD_SELECTORS` that
 exists. It will not bypass login challenges, captchas, or two-factor prompts.
 
+To run only the Supercell reward flow once:
+
+```bash
+bun run claim:supercell
+```
+
+This one-shot command always enables reward clicking for that run. It reuses the
+configured Playwright auth state and still refuses to bypass login challenges,
+captchas, or two-factor prompts.
+
 ## Oracle deployment
 
 Production deployment is owned by the `oracle` runtime repo. Keep this app

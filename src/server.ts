@@ -22,6 +22,7 @@ const SOURCE_TIMEOUT_MS = 60_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
 const STATE_FILE = "dashboard.json";
+const CLAIM_SUPERCELL_REWARD_FLAG = "--claim-supercell-reward";
 
 type SourceId = (typeof DEFAULT_ENABLED_SOURCES)[number];
 
@@ -883,6 +884,38 @@ async function collectDashboardNow() {
   return activeCollection;
 }
 
+async function claimSupercellRewardOnce() {
+  const startedAt = new Date().toISOString();
+  const config: AppConfig = {
+    ...getConfig(),
+    supercellRewardEnabled: true,
+  };
+  const browser = await chromium.launch({
+    headless: true,
+  });
+
+  try {
+    const supercellSection = await collectWithPage(
+      browser,
+      config,
+      "supercell",
+      (page) => collectSupercellReward(page, config),
+    );
+    dashboardState = {
+      collecting: false,
+      lastRunStartedAt: startedAt,
+      lastRunFinishedAt: new Date().toISOString(),
+      sections: [supercellSection],
+    };
+    await saveDashboardState(dashboardState, config);
+    console.log(JSON.stringify(supercellSection, null, 2));
+
+    return supercellSection;
+  } finally {
+    await browser.close();
+  }
+}
+
 async function getDashboardState() {
   await loadDashboardState();
 
@@ -1272,6 +1305,11 @@ async function startScheduler() {
 if (process.argv.includes("--capture-once")) {
   await collectDashboardNow();
   process.exit(0);
+}
+
+if (process.argv.includes(CLAIM_SUPERCELL_REWARD_FLAG)) {
+  const supercellSection = await claimSupercellRewardOnce();
+  process.exit(supercellSection.status === "error" ? 1 : 0);
 }
 
 const port = Number(process.env.PORT || DEFAULT_PORT);
