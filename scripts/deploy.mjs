@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
-const service = "morning";
+const service = "brawlstars";
 const remoteHost = process.env.ORACLE_HOST ?? "oracle";
 const remoteDeployRoot =
   process.env.ORACLE_DEPLOY_ROOT ?? "/home/ubuntu/bots/oracle";

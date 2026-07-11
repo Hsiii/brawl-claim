@@ -1,141 +1,54 @@
-# Morning Dashboard
+# Brawl Stars Store Claimer
 
-A personal feed digest dashboard. It uses Playwright to collect the parts of
-sites that are useful at a glance: timeline links, notification links, DM list
-previews, recommendation cards, and targeted screenshots.
+A small Bun and Playwright service for one job: opening the official Supercell
+Store Brawl Stars page and claiming the visible daily reward button when the
+saved auth state is logged in.
 
-The app runs as a small Bun server. It collects on startup and on an interval,
-stores JSON plus screenshots under `.data/screenshots`, and renders the digest
-at `/`.
+It does not bypass login challenges, captchas, email codes, or two-factor
+prompts. If Supercell shows a login prompt, refresh the saved auth state.
 
 ## Setup
 
 ```bash
 bun install
 bunx playwright install chromium
-cp .env.example .env.local
 bun run dev
 ```
 
 Open `http://localhost:3100`.
 
-Set `MORNING_ACCESS_USERNAME` and `MORNING_ACCESS_PASSWORD` before exposing the
-server on a public domain. When both are set, every dashboard and API route
-requires browser Basic Auth.
-
-## Sources
-
-Default sources are:
-
-- X: screenshots the logged-in timeline and extracts 12 visible post links.
-- Instagram: clicks the DM/inbox entry and screenshots the DM list preview only.
-- Messenger: screenshots the chat list preview only.
-- Facebook: opens notifications and extracts visible notification links.
-- Anigamer: opens/reads the notification panel and extracts notification links.
-- Supercell Store: checks the top section for a reward button and screenshots
-  the store top area.
-- YouTube: extracts the top 6 visible home recommendation links.
-
-GitHub and Chrome Web Store are intentionally skipped.
-
-Every section includes a source link. Open it from your Mac to use your normal
-already-logged-in Chrome session.
-
-## Auth State
-
-Most feed sites are useful only when logged in. Save a Playwright storage state
-after logging in:
+## Commands
 
 ```bash
+bun run claim
 bun run auth:setup
 ```
 
-This opens a local-only setup page and launches your installed Google Chrome app
-with a separate Chrome profile controlled through DevTools. Log in to the
-sources there, save the storage state, then upload it to Oracle from the tool.
-The tool does not receive or display passwords; it saves cookies and browser
-storage only.
+`bun run claim` runs the claim flow once and writes status plus a screenshot
+under the configured data directory.
 
-It intentionally does not attach to your normal Chrome profile. Chrome blocks
-remote debugging against the default profile, and Playwright does not support
-automating the main Chrome data directory. The setup profile persists at
-`.data/auth-browser-profile`, so future refreshes should reuse those logins.
-Override the Chrome path with `AUTH_TOOL_CHROME_PATH` if needed.
+`bun run auth:setup` starts a local-only helper page. Use it to open Supercell
+Store in the dedicated auth profile, log into Supercell ID, save the Playwright
+storage state, and upload it to Oracle.
 
-You can also use Playwright directly:
+## Configuration
 
-```bash
-bunx playwright codegen --save-storage=.data/auth.json https://www.instagram.com/
-```
-
-Use the same browser session to log into the other sites you care about before
-closing the codegen browser. Set `MORNING_AUTH_STATE_FILE=.data/auth.json`.
-
-On Oracle, save the auth state to the mounted state path, for example
-`/app/state/auth.json`, then set `MORNING_AUTH_STATE_FILE=/app/state/auth.json`.
-
-## Manual refresh
-
-If `MORNING_REFRESH_TOKEN` is set, manual refreshes require it:
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $MORNING_REFRESH_TOKEN" \
-  http://localhost:3100/api/refresh
-```
-
-If the token is empty, `POST /api/refresh` is open on the local server.
-
-## Supercell daily reward
-
-Supercell Store reward clicking is off by default. After auth state is saved and
-verified, set:
+Primary environment variables:
 
 ```env
-MORNING_SUPERCELL_REWARD_ENABLED=true
+BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH=/brawlstars
+BRAWL_STARS_CLAIMER_DATA_DIR=/app/state
+BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=/app/state/auth.json
+BRAWL_STARS_CLAIMER_ACCESS_USERNAME=
+BRAWL_STARS_CLAIMER_ACCESS_PASSWORD=
+BRAWL_STARS_CLAIMER_REFRESH_TOKEN=
+BRAWL_STARS_CLAIMER_REWARD_SELECTORS=button:has-text("Claim"),button:has-text("Collect")
 ```
 
-The bot clicks the first selector from `MORNING_SUPERCELL_REWARD_SELECTORS` that
-exists. It will not bypass login challenges, captchas, or two-factor prompts.
+The old `MORNING_*` variables are still accepted as fallbacks during migration.
 
-To run only the Supercell reward flow once:
+## Oracle
 
-```bash
-bun run claim:supercell
-```
-
-This one-shot command always enables reward clicking for that run. It reuses the
-configured Playwright auth state and still refuses to bypass login challenges,
-captchas, or two-factor prompts.
-
-## Oracle deployment
-
-Production deployment is owned by the `oracle` runtime repo. Keep this app
-checked out on the VM at `/home/ubuntu/bots/apps/morning`, then put production
-configuration in `/home/ubuntu/bots/secrets/morning.env`.
-
-Use state paths inside `/app/state`:
-
-```env
-MORNING_SCREENSHOT_DIR=/app/state/screenshots
-MORNING_AUTH_STATE_FILE=/app/state/auth.json
-```
-
-Then deploy:
-
-```bash
-/home/ubuntu/bots/oracle/scripts/deploy-morning
-```
-
-The dashboard listens on port `3100`.
-The `oracle` Compose service currently sets `MORNING_CAPTURE_ENABLED=false`,
-which keeps the dashboard available without running scheduled source captures.
-It also skips Chromium installation at image build time. Re-enable the
-`INSTALL_PLAYWRIGHT_BROWSERS` build arg in the `oracle` repo before turning
-scheduled captures back on.
-
-For a subpath deployment such as `https://bot.hsichen.dev/morning/`, set:
-
-```env
-MORNING_PUBLIC_BASE_PATH=/morning
-```
+Production deployment is owned by the `oracle` runtime repo. The app is still
+checked out on the VM at `/home/ubuntu/bots/apps/morning`, but the service is
+deployed as the Brawl Stars Store Claimer.

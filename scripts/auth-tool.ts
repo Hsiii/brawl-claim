@@ -11,11 +11,11 @@ const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_CDP_PORT = 9322;
-const REMOTE_TMP_AUTH_FILE = "/tmp/morning-dashboard-auth.json";
+const REMOTE_TMP_AUTH_FILE = "/tmp/brawl-stars-claimer-auth.json";
 const REMOTE_AUTH_FILE = "/app/state/auth.json";
 const REMOTE_ORACLE_DIR = "/home/ubuntu/bots/oracle";
-const REMOTE_MORNING_ENV_FILE = "/home/ubuntu/bots/secrets/morning.env";
-const DASHBOARD_URL = "https://bot.hsichen.dev/morning/";
+const REMOTE_ENV_FILE = "/home/ubuntu/bots/secrets/brawl-stars-claimer.env";
+const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
 
 type SourceConfig = {
   id: string;
@@ -66,46 +66,10 @@ type StorageState = {
 
 const sources: SourceConfig[] = [
   {
-    id: "x",
-    label: "X",
-    url: "https://twitter.com/home",
-    note: "Timeline screenshot and visible post links.",
-  },
-  {
-    id: "instagram",
-    label: "Instagram",
-    url: "https://www.instagram.com/direct/inbox/",
-    note: "DM list preview only.",
-  },
-  {
-    id: "messenger",
-    label: "Messenger",
-    url: "https://www.messenger.com/",
-    note: "Chat list preview only.",
-  },
-  {
-    id: "facebook",
-    label: "Facebook",
-    url: "https://www.facebook.com/",
-    note: "Notification panel links.",
-  },
-  {
-    id: "anigamer",
-    label: "Anigamer",
-    url: "https://ani.gamer.com.tw/",
-    note: "Notification panel links.",
-  },
-  {
     id: "supercell",
-    label: "Supercell Store",
+    label: "Brawl Stars Store",
     url: "https://store.supercell.com/brawlstars",
-    note: "Reward status and store top section.",
-  },
-  {
-    id: "youtube",
-    label: "YouTube",
-    url: "https://www.youtube.com/",
-    note: "Home recommendations.",
+    note: "Login state used by the daily reward claimer.",
   },
 ];
 
@@ -627,20 +591,20 @@ async function uploadAuthState() {
 
   const remoteCommand = `
 set -e
-container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q morning-dashboard)"
+container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 if [ -z "$container_id" ]; then
-  ${REMOTE_ORACLE_DIR}/scripts/deploy-morning
-  container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q morning-dashboard)"
+  ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
+  container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 fi
 sudo docker cp ${REMOTE_TMP_AUTH_FILE} "$container_id:${REMOTE_AUTH_FILE}"
 sudo docker exec -u root "$container_id" chown bun:bun ${REMOTE_AUTH_FILE}
 sudo docker exec -u root "$container_id" chmod 600 ${REMOTE_AUTH_FILE}
-if grep -q '^MORNING_AUTH_STATE_FILE=' ${REMOTE_MORNING_ENV_FILE}; then
-  sed -i 's#^MORNING_AUTH_STATE_FILE=.*#MORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}#' ${REMOTE_MORNING_ENV_FILE}
+if grep -q '^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=' ${REMOTE_ENV_FILE}; then
+  sed -i 's#^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=.*#BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}#' ${REMOTE_ENV_FILE}
 else
-  printf '\\nMORNING_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}\\n' >> ${REMOTE_MORNING_ENV_FILE}
+  printf '\\nBRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}\\n' >> ${REMOTE_ENV_FILE}
 fi
-${REMOTE_ORACLE_DIR}/scripts/deploy-morning
+${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
 rm -f ${REMOTE_TMP_AUTH_FILE}
 `;
 
@@ -687,7 +651,7 @@ function renderPage() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Morning Auth Setup</title>
+  <title>Brawl Stars Claimer Auth Setup</title>
   <style>
     :root {
       --color-bg: #111315;
@@ -788,15 +752,15 @@ function renderPage() {
   <main>
     <header>
       <div>
-        <h1>Morning Auth Setup</h1>
-        <p>Local-only tool. Log in in the dedicated Chrome auth profile, save storage, then upload to Oracle.</p>
+        <h1>Brawl Stars Claimer Auth Setup</h1>
+        <p>Local-only tool. Log into Supercell Store in the dedicated Chrome auth profile, save storage, then upload to Oracle.</p>
       </div>
-      <a href="${DASHBOARD_URL}">Dashboard</a>
+      <a href="${DASHBOARD_URL}">Claimer</a>
     </header>
 
     <section class="panel">
       <ol>
-        <li>Click Open All, or open sources one by one.</li>
+        <li>Open Brawl Stars Store and complete Supercell ID login.</li>
         <li>Log in directly in the browser windows. Do not enter passwords in this page.</li>
         <li>Click Save Auth State after all sites are logged in.</li>
         <li>Click Upload To Oracle. This copies only the Playwright storage JSON.</li>
@@ -804,7 +768,7 @@ function renderPage() {
     </section>
 
     <section class="actions">
-      <button id="open-all">Open All</button>
+      <button id="open-all">Open Store</button>
       <button id="save">Save Auth State</button>
       <button id="upload">Upload To Oracle</button>
       <button id="status">Refresh Status</button>
@@ -982,7 +946,7 @@ const server = Bun.serve({
 
 const toolUrl = `http://${server.hostname}:${server.port}/?token=${token}`;
 
-console.log(`Morning auth setup listening at ${toolUrl}`);
+console.log(`Brawl Stars auth setup listening at ${toolUrl}`);
 console.log("This server is bound to localhost and uses a one-time URL token.");
 
 process.on("SIGINT", async () => {

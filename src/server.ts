@@ -1,113 +1,75 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { Browser, Locator, Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import { chromium } from "playwright";
 
+const APP_NAME = "Brawl Stars Store Claimer";
+const STORE_URL = "https://store.supercell.com/brawlstars";
 const DEFAULT_PORT = 3100;
-const DEFAULT_DATA_DIR = ".data/dashboard";
-const DEFAULT_COLLECT_INTERVAL_MINUTES = 180;
-const DEFAULT_ENABLED_SOURCES = [
-  "x",
-  "instagram",
-  "messenger",
-  "facebook",
-  "anigamer",
-  "supercell",
-  "youtube",
-] as const;
+const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
+const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 30_000;
-const SOURCE_TIMEOUT_MS = 60_000;
+const CLAIM_TIMEOUT_MS = 75_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
-const STATE_FILE = "dashboard.json";
-const CLAIM_SUPERCELL_REWARD_FLAG = "--claim-supercell-reward";
+const STATE_FILE = "claimer.json";
+const CLAIM_FLAGS = new Set([
+  "--claim-once",
+  "--claim-supercell-reward",
+  "--capture-once",
+]);
 
-type SourceId = (typeof DEFAULT_ENABLED_SOURCES)[number];
+type ClaimStatus = "claimed" | "no_reward" | "login_required" | "error";
 
-type DashboardItem = {
+type ClaimOffer = {
   title: string;
   url: string;
-  subtitle?: string;
-  summary?: string;
-  timestamp?: string;
 };
 
-type DashboardSection = {
-  id: SourceId;
-  title: string;
+type ClaimResult = {
+  status: ClaimStatus;
+  claimed: boolean;
+  loggedIn: boolean;
+  message: string;
+  checkedAt: string;
   sourceUrl: string;
-  status: "ok" | "empty" | "error" | "config";
-  collectedAt: string;
-  items: DashboardItem[];
   imageUrl?: string;
-  message?: string;
+  offers: ClaimOffer[];
 };
 
-type DashboardState = {
-  collecting: boolean;
+type ClaimState = {
+  claiming: boolean;
   lastRunStartedAt?: string;
   lastRunFinishedAt?: string;
-  sections: DashboardSection[];
+  result?: ClaimResult;
 };
 
 type AppConfig = {
   accessPassword?: string;
   accessUsername?: string;
   authStateFile?: string;
-  collectEnabled: boolean;
+  claimEnabled: boolean;
   dataDir: string;
-  enabledSources: Set<SourceId>;
   intervalMs: number;
   publicBasePath: string;
   refreshToken?: string;
-  supercellRewardEnabled: boolean;
-  supercellRewardSelectors: string[];
+  rewardSelectors: string[];
 };
 
-type LinkCandidate = {
-  title: string;
-  url: string;
-  subtitle?: string;
+let claimState: ClaimState = {
+  claiming: false,
 };
+let activeClaim: Promise<ClaimState> | null = null;
 
-const sourceMeta = {
-  anigamer: {
-    title: "Anigamer Notifications",
-    sourceUrl: "https://ani.gamer.com.tw/",
-  },
-  facebook: {
-    title: "Facebook Notifications",
-    sourceUrl: "https://www.facebook.com/",
-  },
-  instagram: {
-    title: "Instagram DM Preview",
-    sourceUrl: "https://www.instagram.com/direct/inbox/",
-  },
-  messenger: {
-    title: "Messenger Preview",
-    sourceUrl: "https://www.messenger.com/",
-  },
-  supercell: {
-    title: "Supercell Store Reward",
-    sourceUrl: "https://store.supercell.com/brawlstars",
-  },
-  x: {
-    title: "X Timeline",
-    sourceUrl: "https://twitter.com/home",
-  },
-  youtube: {
-    title: "YouTube Recommendations",
-    sourceUrl: "https://www.youtube.com/",
-  },
-} satisfies Record<SourceId, { title: string; sourceUrl: string }>;
-
-let dashboardState: DashboardState = {
-  collecting: false,
-  sections: [],
-};
-let activeCollection: Promise<DashboardState> | null = null;
+function readEnv(name: string, legacyName?: string) {
+  return (
+    process.env[name]?.trim() ||
+    (legacyName ? process.env[legacyName]?.trim() : undefined) ||
+    undefined
+  );
+}
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
   if (value === undefined || value.trim() === "") {
@@ -127,40 +89,49 @@ function normalizeBasePath(value: string | undefined) {
   return `/${trimmed.replace(/^\/+|\/+$/g, "")}`;
 }
 
-function parseEnabledSources(value: string | undefined) {
-  const requestedSources = value?.trim()
-    ? value.split(",").map((source) => source.trim().toLowerCase())
-    : DEFAULT_ENABLED_SOURCES;
-  const knownSources = new Set<string>(DEFAULT_ENABLED_SOURCES);
-
-  return new Set(
-    requestedSources.filter((source): source is SourceId =>
-      knownSources.has(source),
-    ),
-  );
-}
-
 function getConfig(): AppConfig {
   return {
-    accessPassword: process.env.MORNING_ACCESS_PASSWORD?.trim() || undefined,
-    accessUsername: process.env.MORNING_ACCESS_USERNAME?.trim() || undefined,
-    authStateFile: process.env.MORNING_AUTH_STATE_FILE?.trim() || undefined,
-    collectEnabled: parseBoolean(process.env.MORNING_CAPTURE_ENABLED, true),
-    dataDir: process.env.MORNING_SCREENSHOT_DIR?.trim() || DEFAULT_DATA_DIR,
-    enabledSources: parseEnabledSources(process.env.MORNING_ENABLED_SOURCES),
-    intervalMs:
-      Number(process.env.MORNING_CAPTURE_INTERVAL_MINUTES) *
-        60 *
-        1000 || DEFAULT_COLLECT_INTERVAL_MINUTES * 60 * 1000,
-    publicBasePath: normalizeBasePath(process.env.MORNING_PUBLIC_BASE_PATH),
-    refreshToken: process.env.MORNING_REFRESH_TOKEN?.trim() || undefined,
-    supercellRewardEnabled: parseBoolean(
-      process.env.MORNING_SUPERCELL_REWARD_ENABLED,
+    accessPassword: readEnv(
+      "BRAWL_STARS_CLAIMER_ACCESS_PASSWORD",
+      "MORNING_ACCESS_PASSWORD",
+    ),
+    accessUsername: readEnv(
+      "BRAWL_STARS_CLAIMER_ACCESS_USERNAME",
+      "MORNING_ACCESS_USERNAME",
+    ),
+    authStateFile: readEnv(
+      "BRAWL_STARS_CLAIMER_AUTH_STATE_FILE",
+      "MORNING_AUTH_STATE_FILE",
+    ),
+    claimEnabled: parseBoolean(
+      readEnv("BRAWL_STARS_CLAIMER_ENABLED", "MORNING_CAPTURE_ENABLED"),
       false,
     ),
-    supercellRewardSelectors: (
-      process.env.MORNING_SUPERCELL_REWARD_SELECTORS ||
-      'button:has-text("Claim"),button:has-text("Collect"),text=Claim,text=Collect'
+    dataDir:
+      readEnv("BRAWL_STARS_CLAIMER_DATA_DIR", "MORNING_SCREENSHOT_DIR") ||
+      DEFAULT_DATA_DIR,
+    intervalMs:
+      Number(
+        readEnv(
+          "BRAWL_STARS_CLAIMER_INTERVAL_MINUTES",
+          "MORNING_CAPTURE_INTERVAL_MINUTES",
+        ),
+      ) *
+        60 *
+        1000 || DEFAULT_INTERVAL_MINUTES * 60 * 1000,
+    publicBasePath: normalizeBasePath(
+      readEnv("BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH", "MORNING_PUBLIC_BASE_PATH"),
+    ),
+    refreshToken: readEnv(
+      "BRAWL_STARS_CLAIMER_REFRESH_TOKEN",
+      "MORNING_REFRESH_TOKEN",
+    ),
+    rewardSelectors: (
+      readEnv(
+        "BRAWL_STARS_CLAIMER_REWARD_SELECTORS",
+        "MORNING_SUPERCELL_REWARD_SELECTORS",
+      ) ||
+      'button:has-text("Claim"),button:has-text("Collect"),[role="button"]:has-text("Claim"),[role="button"]:has-text("Collect")'
     )
       .split(",")
       .map((selector) => selector.trim())
@@ -180,15 +151,6 @@ function assetUrl(config: AppConfig, filename: string) {
   return `${config.publicBasePath}/assets/${encodeURIComponent(filename)}`;
 }
 
-function slugify(value: string) {
-  return (
-    value
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "item"
-  );
-}
-
 function escapeHtml(value: string) {
   return value
     .replaceAll("&", "&amp;")
@@ -197,7 +159,7 @@ function escapeHtml(value: string) {
     .replaceAll('"', "&quot;");
 }
 
-function compactText(value: string, maxLength = 180) {
+function compactText(value: string, maxLength = 160) {
   const text = value.replace(/\s+/g, " ").trim();
 
   if (text.length <= maxLength) {
@@ -207,44 +169,11 @@ function compactText(value: string, maxLength = 180) {
   return `${text.slice(0, maxLength - 1).trim()}...`;
 }
 
-function section({
-  id,
-  status,
-  items = [],
-  imageUrl,
-  message,
-}: {
-  id: SourceId;
-  status: DashboardSection["status"];
-  items?: DashboardItem[];
-  imageUrl?: string;
-  message?: string;
-}): DashboardSection {
-  return {
-    id,
-    title: sourceMeta[id].title,
-    sourceUrl: sourceMeta[id].sourceUrl,
-    status,
-    collectedAt: new Date().toISOString(),
-    items,
-    imageUrl,
-    message,
-  };
-}
-
-function errorSection(id: SourceId, error: unknown): DashboardSection {
-  return section({
-    id,
-    status: "error",
-    message: error instanceof Error ? error.message : "Unknown error",
-  });
-}
-
-async function loadDashboardState(config = getConfig()) {
+async function loadClaimState(config = getConfig()) {
   try {
-    dashboardState = JSON.parse(
+    claimState = JSON.parse(
       await readFile(statePath(config), "utf8"),
-    ) as DashboardState;
+    ) as ClaimState;
   } catch (error) {
     if (
       error &&
@@ -252,19 +181,16 @@ async function loadDashboardState(config = getConfig()) {
       "code" in error &&
       (error as { code?: string }).code === "ENOENT"
     ) {
-      return dashboardState;
+      return claimState;
     }
 
-    console.warn("Failed to read dashboard state:", error);
+    console.warn("Failed to read claim state:", error);
   }
 
-  return dashboardState;
+  return claimState;
 }
 
-async function saveDashboardState(
-  nextState: DashboardState,
-  config = getConfig(),
-) {
+async function saveClaimState(nextState: ClaimState, config = getConfig()) {
   await mkdir(dirname(statePath(config)), { recursive: true });
   await writeFile(statePath(config), JSON.stringify(nextState, null, 2));
 }
@@ -290,29 +216,12 @@ async function withTimeout<T>(
   }
 }
 
-async function goto(page: Page, url: string) {
-  await page.goto(url, {
+async function gotoStore(page: Page) {
+  await page.goto(STORE_URL, {
     waitUntil: "domcontentloaded",
     timeout: NAVIGATION_TIMEOUT_MS,
   });
   await page.waitForTimeout(2_000);
-}
-
-async function clickFirstVisible(page: Page, selectors: string[]) {
-  for (const selector of selectors) {
-    const locator = page.locator(selector).first();
-
-    try {
-      if (await locator.isVisible({ timeout: 1_500 })) {
-        await locator.click({ timeout: ACTION_TIMEOUT_MS });
-        return true;
-      }
-    } catch {
-      // Try the next selector.
-    }
-  }
-
-  return false;
 }
 
 async function firstVisibleLocator(page: Page, selectors: string[]) {
@@ -360,568 +269,183 @@ async function screenshotTarget({
   return assetUrl(config, filename);
 }
 
-async function extractLinksFromLocator(
-  locator: Locator,
-  maxItems: number,
-): Promise<LinkCandidate[]> {
-  const rawLinks = await locator.locator("a[href]").evaluateAll(
-    (anchors, limit) =>
-      anchors
-        .map((anchor) => {
-          const element = anchor as HTMLAnchorElement;
-          const title =
+async function extractOffers(page: Page): Promise<ClaimOffer[]> {
+  const rawOffers = await page.locator("a[href*='/product/']").evaluateAll(
+    (anchors) =>
+      anchors.map((anchor) => {
+        const element = anchor as HTMLAnchorElement;
+
+        return {
+          title:
             element.innerText?.trim() ||
             element.getAttribute("aria-label")?.trim() ||
             element.getAttribute("title")?.trim() ||
-            "";
-
-          return {
-            title,
-            url: element.href,
-          };
-        })
-        .filter((item) => item.title && item.url)
-        .slice(0, limit * 3),
-    maxItems,
+            "",
+          url: element.href,
+        };
+      }),
   );
   const seenUrls = new Set<string>();
-  const items: LinkCandidate[] = [];
+  const offers: ClaimOffer[] = [];
 
-  for (const link of rawLinks) {
-    if (seenUrls.has(link.url)) {
+  for (const offer of rawOffers) {
+    if (!offer.title || !offer.url || seenUrls.has(offer.url)) {
       continue;
     }
 
-    seenUrls.add(link.url);
-    items.push({
-      title: compactText(link.title, 140),
-      url: link.url,
+    seenUrls.add(offer.url);
+    offers.push({
+      title: compactText(offer.title),
+      url: offer.url,
     });
 
-    if (items.length >= maxItems) {
+    if (offers.length >= 4) {
       break;
     }
   }
 
-  return items;
+  return offers;
 }
 
-async function collectWithPage(
-  browser: Browser,
-  config: AppConfig,
-  id: SourceId,
-  collect: (page: Page) => Promise<DashboardSection>,
-) {
-  return withTimeout(
-    (async () => {
-      const context = await browser.newContext({
-        storageState: config.authStateFile,
-        viewport: {
-          width: VIEWPORT_WIDTH,
-          height: VIEWPORT_HEIGHT,
-        },
-      });
-      const page = await context.newPage();
-
-      page.setDefaultTimeout(ACTION_TIMEOUT_MS);
-
-      try {
-        return await collect(page);
-      } catch (error) {
-        return errorSection(id, error);
-      } finally {
-        await context.close();
-      }
-    })(),
-    SOURCE_TIMEOUT_MS,
-    sourceMeta[id].title,
-  ).catch((error) => errorSection(id, error));
+async function clickRewardButton(rewardButton: Locator) {
+  await rewardButton.click({ timeout: ACTION_TIMEOUT_MS });
+  await rewardButton.page().waitForTimeout(2_000);
 }
 
-async function collectXTimeline(
+async function claimWithPage(
   page: Page,
   config: AppConfig,
-): Promise<DashboardSection> {
-  await goto(page, sourceMeta.x.sourceUrl);
-  await page
-    .locator('article a[href*="/status/"]')
-    .first()
-    .waitFor({ timeout: 12_000 })
-    .catch(() => undefined);
+): Promise<ClaimResult> {
+  await gotoStore(page);
 
-  const rawPosts = await page.locator("article").evaluateAll((articles) =>
-    articles.map((article) => {
-      const statusLink = article.querySelector(
-        'a[href*="/status/"]',
-      ) as HTMLAnchorElement | null;
-      const text = (article as HTMLElement).innerText?.trim() || "";
-
-      return {
-        text,
-        url: statusLink?.href || "",
-      };
-    }),
-  );
-  const seenUrls = new Set<string>();
-  const items: DashboardItem[] = [];
-
-  for (const post of rawPosts) {
-    if (!post.url || seenUrls.has(post.url)) {
-      continue;
-    }
-
-    seenUrls.add(post.url);
-    items.push({
-      title: compactText(post.text, 140) || "X post",
-      url: post.url,
-      summary: post.text,
-    });
-
-    if (items.length >= 12) {
-      break;
-    }
-  }
-
-  const imageUrl = await screenshotTarget({
-    config,
-    filename: "x-timeline.png",
-    page,
-    selectors: ['main[role="main"]', '[data-testid="primaryColumn"]', "main"],
-  });
-
-  return section({
-    id: "x",
-    status: items.length ? "ok" : "empty",
-    imageUrl,
-    items,
-    message: items.length
-      ? "Extracted visible post links from the logged-in timeline."
-      : "No visible timeline posts found.",
-  });
-}
-
-async function collectInstagramDmPreview(
-  page: Page,
-  config: AppConfig,
-): Promise<DashboardSection> {
-  await goto(page, "https://www.instagram.com/");
-
-  const clicked = await clickFirstVisible(page, [
-    'a[href="/direct/inbox/"]',
-    'a[href*="/direct/inbox"]',
-    '[aria-label="Messenger"]',
-    '[aria-label="Direct"]',
+  const loginPrompt = await firstVisibleLocator(page, [
+    'text="Log in to view offers"',
+    'text="LOG IN TO VIEW OFFERS"',
+    'button:has-text("Log in")',
+    'button:has-text("LOG IN")',
   ]);
-
-  if (!clicked) {
-    await goto(page, sourceMeta.instagram.sourceUrl);
-  } else {
-    await page.waitForTimeout(2_500);
-  }
-
-  const imageUrl = await screenshotTarget({
-    config,
-    filename: "instagram-dms.png",
-    page,
-    selectors: [
-      'main[role="main"]',
-      '[role="main"]',
-      'div:has-text("Messages")',
-      "main",
-      "body",
-    ],
-  });
-
-  return section({
-    id: "instagram",
-    status: "ok",
-    imageUrl,
-    items: [
-      {
-        title: "Open Instagram inbox locally",
-        url: sourceMeta.instagram.sourceUrl,
-      },
-    ],
-    message: "Captured inbox/list preview only. No conversation rows clicked.",
-  });
-}
-
-async function collectMessengerPreview(
-  page: Page,
-  config: AppConfig,
-): Promise<DashboardSection> {
-  await goto(page, sourceMeta.messenger.sourceUrl);
-
-  const imageUrl = await screenshotTarget({
-    config,
-    filename: "messenger-preview.png",
-    page,
-    selectors: [
-      '[aria-label="Chats"]',
-      '[aria-label="聊天"]',
-      '[role="navigation"]',
-      '[role="main"]',
-      "body",
-    ],
-  });
-
-  return section({
-    id: "messenger",
-    status: "ok",
-    imageUrl,
-    items: [
-      {
-        title: "Open Messenger locally",
-        url: sourceMeta.messenger.sourceUrl,
-      },
-    ],
-    message: "Captured chat list preview only. No chat rows clicked.",
-  });
-}
-
-async function collectFacebookNotifications(
-  page: Page,
-  config: AppConfig,
-): Promise<DashboardSection> {
-  await goto(page, sourceMeta.facebook.sourceUrl);
-
-  const clickedNotifications = await clickFirstVisible(page, [
-    '[aria-label="Notifications"][role="button"]',
-    '[aria-label="通知"][role="button"]',
-    'div[role="button"][aria-label*="Notifications"]',
-    'div[role="button"][aria-label*="通知"]',
-    'a[aria-label*="Notifications"]',
-    'a[aria-label*="通知"]',
-  ]);
-  await page.waitForTimeout(2_000);
-
-  if (!clickedNotifications) {
-    const imageUrl = await screenshotTarget({
-      config,
-      filename: "facebook-notifications.png",
-      page,
-      selectors: ["body"],
-    });
-
-    return section({
-      id: "facebook",
-      status: "config",
-      imageUrl,
-      message:
-        "Could not find the notifications button. Saved Playwright auth state is probably missing or expired.",
-    });
-  }
-
-  const panel =
-    (await firstVisibleLocator(page, [
-      'div[role="dialog"]',
-      '[aria-label="Notifications"]',
-      '[aria-label="通知"]',
-      '[role="main"]',
-    ])) ?? undefined;
-
-  if (!panel) {
-    return section({
-      id: "facebook",
-      status: "empty",
-      message: "Notifications panel did not open.",
-    });
-  }
-
-  const links = await extractLinksFromLocator(panel, 12);
-  const imageUrl = await screenshotTarget({
-    config,
-    filename: "facebook-notifications.png",
-    page,
-    selectors: [
-      'div[role="dialog"]',
-      '[aria-label="Notifications"]',
-      '[aria-label="通知"]',
-      "body",
-    ],
-  });
-
-  return section({
-    id: "facebook",
-    status: links.length ? "ok" : "empty",
-    imageUrl,
-    items: links,
-    message: links.length
-      ? "Notification links extracted without opening individual notifications."
-      : "No notification links found.",
-  });
-}
-
-async function collectAnigamerNotifications(page: Page): Promise<DashboardSection> {
-  await goto(page, sourceMeta.anigamer.sourceUrl);
-
-  await clickFirstVisible(page, [
-    'text="通知"',
-    'a:has-text("通知")',
-    'button:has-text("通知")',
-    '[aria-label*="通知"]',
-  ]);
-  await page.waitForTimeout(1_500);
-
-  const links = (await extractLinksFromLocator(page.locator("body"), 16))
-    .filter((link) =>
-      /更新|通知|站內信|公告|小時前|天前|分鐘前/.test(link.title),
-    )
-    .slice(0, 12);
-
-  return section({
-    id: "anigamer",
-    status: links.length ? "ok" : "empty",
-    items: links,
-    message: links.length
-      ? "Read notification panel links without opening each notification."
-      : "No Anigamer notifications found.",
-  });
-}
-
-async function collectSupercellReward(
-  page: Page,
-  config: AppConfig,
-): Promise<DashboardSection> {
-  await goto(page, sourceMeta.supercell.sourceUrl);
-
-  const rewardButton = await firstVisibleLocator(
-    page,
-    config.supercellRewardSelectors,
-  );
-  let rewardMessage = "No visible reward button found in the top section.";
-  let rewardCollected = false;
+  const loggedIn = loginPrompt === null;
+  const rewardButton = loggedIn
+    ? await firstVisibleLocator(page, config.rewardSelectors)
+    : null;
+  let claimed = false;
+  let status: ClaimStatus = loggedIn ? "no_reward" : "login_required";
+  let message = loggedIn
+    ? "No visible reward button found."
+    : "Supercell Store is logged out. Refresh the saved auth state.";
 
   if (rewardButton) {
-    rewardMessage = config.supercellRewardEnabled
-      ? "Reward button found and clicked."
-      : "Reward button found. Auto-collection is disabled.";
-
-    if (config.supercellRewardEnabled) {
-      await rewardButton.click({ timeout: ACTION_TIMEOUT_MS });
-      await page.waitForTimeout(2_000);
-      rewardCollected = true;
-    }
+    await clickRewardButton(rewardButton);
+    claimed = true;
+    status = "claimed";
+    message = "Reward button found and clicked.";
   }
 
-  const offers = (await extractLinksFromLocator(page.locator("body"), 8))
-    .filter((link) => link.url.includes("/product/"))
-    .slice(0, 4);
+  const offers = await extractOffers(page);
   const imageUrl = await screenshotTarget({
     config,
-    filename: "supercell-top.png",
+    filename: "brawl-stars-store.png",
     page,
     selectors: ["main", "body"],
   });
 
-  return section({
-    id: "supercell",
-    status: "ok",
+  return {
+    status,
+    claimed,
+    loggedIn,
+    message,
+    checkedAt: new Date().toISOString(),
+    sourceUrl: STORE_URL,
     imageUrl,
-    items: [
-      {
-        title: rewardCollected ? "Reward collected" : "Reward status",
-        url: sourceMeta.supercell.sourceUrl,
-        subtitle: rewardMessage,
-      },
-      ...offers.map((offer) => ({
-        title: offer.title,
-        url: offer.url,
-      })),
-    ],
-    message: rewardMessage,
-  });
+    offers,
+  };
 }
 
-async function collectYoutubeRecommendations(
-  page: Page,
-): Promise<DashboardSection> {
-  await goto(page, sourceMeta.youtube.sourceUrl);
-  await page
-    .locator("ytd-rich-item-renderer, ytd-video-renderer, a#video-title")
-    .first()
-    .waitFor({ timeout: 10_000 })
-    .catch(() => undefined);
-
-  const rawVideos = await page.locator("a#video-title").evaluateAll((anchors) =>
-    anchors.map((anchor) => {
-      const element = anchor as HTMLAnchorElement;
-
-      return {
-        title:
-          element.getAttribute("title")?.trim() || element.innerText?.trim(),
-        url: element.href,
-      };
-    }),
-  );
-  const seen = new Set<string>();
-  const items: DashboardItem[] = [];
-
-  for (const video of rawVideos) {
-    if (!video.title || !video.url || seen.has(video.url)) {
-      continue;
-    }
-
-    seen.add(video.url);
-    items.push({
-      title: compactText(video.title, 120),
-      url: video.url,
-    });
-
-    if (items.length >= 6) {
-      break;
-    }
-  }
-
-  return section({
-    id: "youtube",
-    status: items.length ? "ok" : "empty",
-    items,
-    message: items.length
-      ? "Top visible home recommendations."
-      : "No YouTube recommendations found.",
-  });
+function errorResult(error: unknown): ClaimResult {
+  return {
+    status: "error",
+    claimed: false,
+    loggedIn: false,
+    message: error instanceof Error ? error.message : "Unknown error",
+    checkedAt: new Date().toISOString(),
+    sourceUrl: STORE_URL,
+    offers: [],
+  };
 }
 
-async function collectDashboardNow() {
-  const config = getConfig();
-
-  if (activeCollection) {
-    return activeCollection;
-  }
-
-  activeCollection = (async () => {
-    dashboardState = {
-      ...dashboardState,
-      collecting: true,
-      lastRunStartedAt: new Date().toISOString(),
-    };
-    await saveDashboardState(dashboardState, config);
-
-    const sections: DashboardSection[] = [];
-    let browser: Browser | undefined;
-    const getBrowser = async () => {
-      browser ??= await chromium.launch({
+async function claimBrawlStarsReward(config = getConfig()) {
+  return withTimeout(
+    (async () => {
+      const browser = await chromium.launch({
         headless: true,
       });
 
-      return browser;
-    };
+      try {
+        const contextOptions = {
+          storageState: config.authStateFile,
+          viewport: {
+            width: VIEWPORT_WIDTH,
+            height: VIEWPORT_HEIGHT,
+          },
+        };
+        const context = await browser.newContext(contextOptions);
+        const page = await context.newPage();
 
-    try {
-      if (config.enabledSources.has("x")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "x", (page) =>
-            collectXTimeline(page, config),
-          ),
-        );
+        page.setDefaultTimeout(ACTION_TIMEOUT_MS);
+
+        try {
+          return await claimWithPage(page, config);
+        } finally {
+          await context.close();
+        }
+      } finally {
+        await browser.close();
       }
-
-      if (config.enabledSources.has("instagram")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "instagram", (page) =>
-            collectInstagramDmPreview(page, config),
-          ),
-        );
-      }
-
-      if (config.enabledSources.has("messenger")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "messenger", (page) =>
-            collectMessengerPreview(page, config),
-          ),
-        );
-      }
-
-      if (config.enabledSources.has("facebook")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "facebook", (page) =>
-            collectFacebookNotifications(page, config),
-          ),
-        );
-      }
-
-      if (config.enabledSources.has("anigamer")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "anigamer", (page) =>
-            collectAnigamerNotifications(page),
-          ),
-        );
-      }
-
-      if (config.enabledSources.has("supercell")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "supercell", (page) =>
-            collectSupercellReward(page, config),
-          ),
-        );
-      }
-
-      if (config.enabledSources.has("youtube")) {
-        sections.push(
-          await collectWithPage(await getBrowser(), config, "youtube", (page) =>
-            collectYoutubeRecommendations(page),
-          ),
-        );
-      }
-    } finally {
-      await browser?.close();
-    }
-
-    dashboardState = {
-      collecting: false,
-      lastRunStartedAt: dashboardState.lastRunStartedAt,
-      lastRunFinishedAt: new Date().toISOString(),
-      sections,
-    };
-    await saveDashboardState(dashboardState, config);
-
-    return dashboardState;
-  })().finally(() => {
-    activeCollection = null;
-  });
-
-  return activeCollection;
+    })(),
+    CLAIM_TIMEOUT_MS,
+    APP_NAME,
+  ).catch(errorResult);
 }
 
-async function claimSupercellRewardOnce() {
-  const startedAt = new Date().toISOString();
-  const config: AppConfig = {
-    ...getConfig(),
-    supercellRewardEnabled: true,
-  };
-  const browser = await chromium.launch({
-    headless: true,
-  });
+async function runClaimNow() {
+  const config = getConfig();
 
-  try {
-    const supercellSection = await collectWithPage(
-      browser,
-      config,
-      "supercell",
-      (page) => collectSupercellReward(page, config),
-    );
-    dashboardState = {
-      collecting: false,
+  if (activeClaim) {
+    return activeClaim;
+  }
+
+  activeClaim = (async () => {
+    const startedAt = new Date().toISOString();
+    claimState = {
+      ...claimState,
+      claiming: true,
+      lastRunStartedAt: startedAt,
+    };
+    await saveClaimState(claimState, config);
+
+    const result = await claimBrawlStarsReward(config);
+    claimState = {
+      claiming: false,
       lastRunStartedAt: startedAt,
       lastRunFinishedAt: new Date().toISOString(),
-      sections: [supercellSection],
+      result,
     };
-    await saveDashboardState(dashboardState, config);
-    console.log(JSON.stringify(supercellSection, null, 2));
+    await saveClaimState(claimState, config);
 
-    return supercellSection;
-  } finally {
-    await browser.close();
-  }
+    return claimState;
+  })().finally(() => {
+    activeClaim = null;
+  });
+
+  return activeClaim;
 }
 
-async function getDashboardState() {
-  await loadDashboardState();
+async function getClaimState() {
+  await loadClaimState();
 
   return {
-    ...dashboardState,
-    collecting: Boolean(activeCollection) || dashboardState.collecting,
+    ...claimState,
+    claiming: Boolean(activeClaim) || claimState.claiming,
   };
 }
 
@@ -979,63 +503,50 @@ function unauthorizedResponse() {
   return new Response("Unauthorized", {
     status: 401,
     headers: {
-      "www-authenticate": 'Basic realm="Morning Dashboard"',
+      "www-authenticate": `Basic realm="${APP_NAME}"`,
     },
   });
 }
 
-function renderItem(item: DashboardItem) {
-  const subtitle = [item.subtitle, item.timestamp]
-    .filter(Boolean)
-    .map((value) => `<span>${escapeHtml(value ?? "")}</span>`)
-    .join("");
-  const summary = item.summary
-    ? `<p class="item-summary">${escapeHtml(compactText(item.summary, 220))}</p>`
-    : "";
+function renderStatusBadge(result: ClaimResult | undefined) {
+  const label = result?.status.replaceAll("_", " ") || "not run";
 
-  return `<li class="item">
-    <a href="${escapeHtml(item.url)}">${escapeHtml(item.title)}</a>
-    ${subtitle ? `<div class="item-meta">${subtitle}</div>` : ""}
-    ${summary}
-  </li>`;
+  return `<span class="badge" data-status="${escapeHtml(result?.status || "idle")}">${escapeHtml(label)}</span>`;
 }
 
-function renderSection(currentSection: DashboardSection) {
-  const message = currentSection.message
-    ? `<p class="section-message">${escapeHtml(currentSection.message)}</p>`
-    : "";
-  const image = currentSection.imageUrl
-    ? `<a class="preview" href="${escapeHtml(currentSection.sourceUrl)}"><img src="${escapeHtml(currentSection.imageUrl)}?t=${encodeURIComponent(currentSection.collectedAt)}" alt="${escapeHtml(currentSection.title)} preview" loading="lazy"></a>`
-    : "";
-  const items = currentSection.items.length
-    ? `<ul class="items">${currentSection.items.map(renderItem).join("")}</ul>`
-    : '<p class="empty">No items.</p>';
+function renderOffers(offers: ClaimOffer[]) {
+  if (offers.length === 0) {
+    return '<p class="empty">No store product links captured.</p>';
+  }
 
-  return `<section class="section-card">
-    <div class="section-header">
-      <div>
-        <h2>${escapeHtml(currentSection.title)}</h2>
-        <a class="source-link" href="${escapeHtml(currentSection.sourceUrl)}">Open source</a>
-      </div>
-      <span class="status ${currentSection.status}">${currentSection.status}</span>
-    </div>
-    ${message}
-    ${image}
-    ${items}
-  </section>`;
+  return `<ul class="offers">${offers
+    .map(
+      (offer) => `<li>
+        <a href="${escapeHtml(offer.url)}">${escapeHtml(offer.title)}</a>
+      </li>`,
+    )
+    .join("")}</ul>`;
 }
 
-function renderDashboard(current: DashboardState, config: AppConfig) {
-  const sections = current.sections.length
-    ? current.sections.map(renderSection).join("")
-    : '<p class="empty">No digest collected yet.</p>';
+function renderPage(state: ClaimState, config: AppConfig) {
+  const result = state.result;
+  const image = result?.imageUrl
+    ? `<a class="preview" href="${escapeHtml(STORE_URL)}"><img src="${escapeHtml(result.imageUrl)}?t=${encodeURIComponent(result.checkedAt)}" alt="Brawl Stars Store preview" loading="lazy"></a>`
+    : '<div class="preview empty-preview">No screenshot yet</div>';
+  const checkedAt = result?.checkedAt
+    ? new Date(result.checkedAt).toLocaleString("en-US", {
+        dateStyle: "medium",
+        timeStyle: "medium",
+        timeZone: "Asia/Taipei",
+      })
+    : "Never";
 
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Morning Dashboard</title>
+  <title>${APP_NAME}</title>
   <style>
     :root {
       --color-bg: #111315;
@@ -1046,9 +557,8 @@ function renderDashboard(current: DashboardState, config: AppConfig) {
       --color-muted: #a5abb7;
       --color-accent: #8ab4ff;
       --color-success: #80d39b;
-      --color-warning: #f0c36a;
+      --color-warning: #ffd166;
       --color-error: #ff8a80;
-      --space-1: 4px;
       --space-2: 8px;
       --space-3: 12px;
       --space-4: 16px;
@@ -1065,9 +575,9 @@ function renderDashboard(current: DashboardState, config: AppConfig) {
       font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     main {
-      width: min(1440px, 100%);
+      width: min(1040px, 100%);
       margin: 0 auto;
-      padding: var(--space-6);
+      padding: var(--space-8);
     }
     header {
       display: flex;
@@ -1076,118 +586,90 @@ function renderDashboard(current: DashboardState, config: AppConfig) {
       align-items: end;
       margin-bottom: var(--space-6);
     }
-    h1, h2, p, ul { margin: 0; }
+    h1, h2, p { margin: 0; }
     h1 { font-size: 28px; line-height: 1.2; }
     h2 { font-size: 18px; line-height: 1.25; }
-    a { color: var(--color-accent); overflow-wrap: anywhere; }
+    a { color: var(--color-accent); }
     button {
       min-height: 40px;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
-      background: var(--color-surface);
+      background: var(--color-surface-raised);
       color: var(--color-text);
       padding: 0 var(--space-4);
       cursor: pointer;
+      white-space: nowrap;
     }
     button:hover { border-color: var(--color-accent); }
-    .subtle, .empty, .section-message, .source-link {
-      color: var(--color-muted);
-    }
-    .subtle { margin-top: var(--space-2); }
-    .actions {
-      display: flex;
-      gap: var(--space-2);
-      align-items: center;
-    }
-    .sections {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
-      gap: var(--space-4);
-      align-items: start;
-    }
-    .section-card {
+    .subtle, .empty, .meta, .message { color: var(--color-muted); }
+    .panel {
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
       background: var(--color-surface);
       overflow: hidden;
     }
-    .section-header {
-      min-height: 72px;
+    .toolbar {
       display: flex;
       justify-content: space-between;
       gap: var(--space-4);
+      align-items: center;
       padding: var(--space-4);
       border-bottom: 1px solid var(--color-border);
     }
-    .section-message {
-      padding: var(--space-3) var(--space-4) 0;
+    .content {
+      display: grid;
+      grid-template-columns: 1.2fr 1fr;
+      gap: var(--space-4);
+      padding: var(--space-4);
     }
-    .status {
-      height: 28px;
-      display: inline-flex;
-      align-items: center;
-      padding: 0 var(--space-2);
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-pill);
-      color: var(--color-muted);
-      white-space: nowrap;
-    }
-    .status.ok { color: var(--color-success); }
-    .status.config, .status.empty { color: var(--color-warning); }
-    .status.error { color: var(--color-error); }
     .preview {
-      display: block;
-      aspect-ratio: 16 / 9;
-      margin: var(--space-4);
+      min-height: 320px;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
       background: var(--color-bg);
       overflow: hidden;
     }
-    img {
+    .preview img {
+      display: block;
       width: 100%;
-      height: 100%;
-      display: block;
-      object-fit: cover;
-      object-position: top center;
+      height: auto;
     }
-    .items {
-      list-style: none;
+    .empty-preview {
       display: grid;
-      gap: var(--space-2);
-      padding: var(--space-4);
+      place-items: center;
+      color: var(--color-muted);
     }
-    .item {
-      padding: var(--space-3);
+    .details {
+      display: grid;
+      align-content: start;
+      gap: var(--space-4);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      width: fit-content;
       border: 1px solid var(--color-border);
-      border-radius: var(--radius-card);
-      background: var(--color-surface-raised);
+      border-radius: var(--radius-pill);
+      padding: 0 var(--space-3);
+      text-transform: capitalize;
     }
-    .item > a {
-      display: block;
-      color: var(--color-text);
-      text-decoration: none;
+    .badge[data-status="claimed"] { color: var(--color-success); }
+    .badge[data-status="login_required"],
+    .badge[data-status="no_reward"] { color: var(--color-warning); }
+    .badge[data-status="error"] { color: var(--color-error); }
+    .offers {
+      margin: 0;
+      padding-left: var(--space-6);
     }
-    .item > a:hover { color: var(--color-accent); }
-    .item-meta {
-      display: flex;
-      gap: var(--space-2);
-      flex-wrap: wrap;
-      margin-top: var(--space-1);
-      color: var(--color-muted);
-      font-size: 13px;
-    }
-    .item-summary {
-      margin-top: var(--space-2);
-      color: var(--color-muted);
-    }
-    .empty { padding: var(--space-4); }
     @media (max-width: 760px) {
       main { padding: var(--space-4); }
-      header, .section-header { display: block; }
-      .actions { margin-top: var(--space-4); }
-      .sections { grid-template-columns: 1fr; }
-      .status { margin-top: var(--space-2); }
+      header, .toolbar {
+        display: grid;
+        align-items: start;
+      }
+      .content { grid-template-columns: 1fr; }
+      button { width: 100%; }
     }
   </style>
 </head>
@@ -1195,15 +677,34 @@ function renderDashboard(current: DashboardState, config: AppConfig) {
   <main>
     <header>
       <div>
-        <h1>Morning Dashboard</h1>
-        <p class="subtle">${current.collecting ? "Collection running" : "Last updated"}${current.lastRunFinishedAt ? ` ${escapeHtml(new Date(current.lastRunFinishedAt).toLocaleString())}` : ""}</p>
+        <h1>${APP_NAME}</h1>
+        <p class="subtle">Brawl Stars daily store reward claim status.</p>
       </div>
-      <div class="actions">
-        <a href="${config.publicBasePath}/api/dashboard">JSON</a>
-        <form method="post" action="${config.publicBasePath}/api/refresh"><button type="submit">Refresh</button></form>
-      </div>
+      <a href="${STORE_URL}">Open store</a>
     </header>
-    <div class="sections">${sections}</div>
+    <section class="panel">
+      <div class="toolbar">
+        <div>
+          <h2>Claim Status</h2>
+          <p class="meta">Last checked: ${escapeHtml(checkedAt)}</p>
+        </div>
+        <form method="post" action="${config.publicBasePath}/api/claim">
+          <button type="submit">${state.claiming ? "Claiming..." : "Claim now"}</button>
+        </form>
+      </div>
+      <div class="content">
+        ${image}
+        <div class="details">
+          ${renderStatusBadge(result)}
+          <p class="message">${escapeHtml(result?.message || "No claim has run yet.")}</p>
+          <div>
+            <h2>Captured Offers</h2>
+            ${renderOffers(result?.offers || [])}
+          </div>
+          <p class="meta">Logged in: ${result ? (result.loggedIn ? "yes" : "no") : "unknown"}</p>
+        </div>
+      </div>
+    </section>
   </main>
 </body>
 </html>`;
@@ -1212,46 +713,45 @@ function renderDashboard(current: DashboardState, config: AppConfig) {
 async function handleRequest(request: Request) {
   const config = getConfig();
   const url = new URL(request.url);
-  const pathname =
-    config.publicBasePath && url.pathname.startsWith(`${config.publicBasePath}/`)
-      ? url.pathname.slice(config.publicBasePath.length)
-      : url.pathname === config.publicBasePath
-        ? "/"
-        : url.pathname;
+  const pathname = url.pathname.replace(config.publicBasePath, "") || "/";
 
-  if (request.method === "GET" && pathname === "/api/health") {
-    return jsonResponse({ ok: true });
+  if (pathname === "/api/health") {
+    return jsonResponse({
+      ok: true,
+      claiming: Boolean(activeClaim) || claimState.claiming,
+    });
   }
 
   if (!isAccessAuthorized(request, config)) {
     return unauthorizedResponse();
   }
 
-  if (
-    request.method === "GET" &&
-    (pathname === "/api/dashboard" || pathname === "/api/screenshots")
-  ) {
-    return jsonResponse(await getDashboardState());
+  if (request.method === "GET" && pathname === "/api/status") {
+    return jsonResponse(await getClaimState());
   }
 
-  if (request.method === "POST" && pathname === "/api/refresh") {
+  if (
+    request.method === "POST" &&
+    (pathname === "/api/claim" || pathname === "/api/refresh")
+  ) {
     if (!isRefreshAuthorized(request, config)) {
       return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
     }
 
-    const nextState = await collectDashboardNow();
+    const nextState = await runClaimNow();
     const accept = request.headers.get("accept") || "";
 
     if (accept.includes("text/html")) {
-      return Response.redirect(new URL(config.publicBasePath || "/", request.url), 303);
+      return Response.redirect(`${url.origin}${config.publicBasePath}/`, 303);
     }
 
-    return jsonResponse({ ok: true, dashboard: nextState });
+    return jsonResponse({ ok: true, state: nextState });
   }
 
   if (request.method === "GET" && pathname.startsWith("/assets/")) {
-    const filename = pathname.slice("/assets/".length);
-    const file = Bun.file(assetPath(config, filename));
+    const filename = decodeURIComponent(pathname.slice("/assets/".length));
+    const path = assetPath(config, filename);
+    const file = Bun.file(path);
 
     if (!(await file.exists())) {
       return new Response("Not found", { status: 404 });
@@ -1259,14 +759,14 @@ async function handleRequest(request: Request) {
 
     return new Response(file, {
       headers: {
-        "cache-control": "no-cache",
-        "content-type": "image/png",
+        "cache-control": "no-store",
+        "content-type": filename.endsWith(".png") ? "image/png" : "text/plain",
       },
     });
   }
 
   if (request.method === "GET" && pathname === "/") {
-    return new Response(renderDashboard(await getDashboardState(), config), {
+    return new Response(renderPage(await getClaimState(), config), {
       headers: {
         "content-type": "text/html; charset=utf-8",
       },
@@ -1279,37 +779,34 @@ async function handleRequest(request: Request) {
 async function startScheduler() {
   const config = getConfig();
 
-  await loadDashboardState(config);
+  await loadClaimState(config);
 
-  if (!config.collectEnabled) {
+  if (!config.claimEnabled) {
     return;
   }
 
-  void collectDashboardNow().catch((error) => {
-    console.error("Dashboard collection failed:", error);
+  void runClaimNow().catch((error) => {
+    console.error("Brawl Stars claim failed:", error);
   });
 
   setInterval(() => {
-    void collectDashboardNow().catch((error) => {
-      console.error("Dashboard collection failed:", error);
+    void runClaimNow().catch((error) => {
+      console.error("Brawl Stars claim failed:", error);
     });
   }, config.intervalMs);
 
   console.log(
-    `Dashboard collection enabled every ${Math.round(
+    `Brawl Stars claimer enabled every ${Math.round(
       config.intervalMs / 60_000,
     )} minutes.`,
   );
 }
 
-if (process.argv.includes("--capture-once")) {
-  await collectDashboardNow();
-  process.exit(0);
-}
+if (process.argv.some((argument) => CLAIM_FLAGS.has(argument))) {
+  const nextState = await runClaimNow();
 
-if (process.argv.includes(CLAIM_SUPERCELL_REWARD_FLAG)) {
-  const supercellSection = await claimSupercellRewardOnce();
-  process.exit(supercellSection.status === "error" ? 1 : 0);
+  console.log(JSON.stringify(nextState.result, null, 2));
+  process.exit(nextState.result?.status === "error" ? 1 : 0);
 }
 
 const port = Number(process.env.PORT || DEFAULT_PORT);
@@ -1322,4 +819,4 @@ const server = Bun.serve({
 
 await startScheduler();
 
-console.log(`Morning Dashboard listening on http://${server.hostname}:${server.port}`);
+console.log(`${APP_NAME} listening on http://${server.hostname}:${server.port}`);

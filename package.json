@@ -1,12 +1,13 @@
 {
-  "name": "morning-dashboard",
+  "name": "brawl-stars-store-claimer",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "auth:setup": "bun scripts/auth-tool.ts",
     "build": "tsc --noEmit",
-    "capture": "bun src/server.ts --capture-once",
+    "capture": "bun src/server.ts --claim-once",
+    "claim": "bun src/server.ts --claim-once",
     "claim:supercell": "bun src/server.ts --claim-supercell-reward",
     "deploy": "bun scripts/deploy.mjs",
     "dev": "bun --watch src/server.ts",
