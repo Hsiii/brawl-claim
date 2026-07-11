@@ -10,8 +10,9 @@ const DEFAULT_PORT = 3100;
 const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
-const NAVIGATION_TIMEOUT_MS = 30_000;
-const CLAIM_TIMEOUT_MS = 75_000;
+const NAVIGATION_TIMEOUT_MS = 45_000;
+const SCREENSHOT_TIMEOUT_MS = 30_000;
+const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
 const STATE_FILE = "claimer.json";
@@ -51,6 +52,7 @@ type AppConfig = {
   accessUsername?: string;
   authStateFile?: string;
   claimEnabled: boolean;
+  claimTimeoutMs: number;
   dataDir: string;
   intervalMs: number;
   publicBasePath: string;
@@ -107,6 +109,9 @@ function getConfig(): AppConfig {
       readEnv("BRAWL_STARS_CLAIMER_ENABLED", "MORNING_CAPTURE_ENABLED"),
       false,
     ),
+    claimTimeoutMs:
+      Number(readEnv("BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS")) ||
+      DEFAULT_CLAIM_TIMEOUT_MS,
     dataDir:
       readEnv("BRAWL_STARS_CLAIMER_DATA_DIR", "MORNING_SCREENSHOT_DIR") ||
       DEFAULT_DATA_DIR,
@@ -257,14 +262,18 @@ async function screenshotTarget({
 
   if (target) {
     try {
-      await target.screenshot({ path });
+      await target.screenshot({ path, timeout: SCREENSHOT_TIMEOUT_MS });
       return assetUrl(config, filename);
     } catch {
       // Fall back to viewport screenshot.
     }
   }
 
-  await page.screenshot({ path, fullPage: false });
+  await page.screenshot({
+    path,
+    fullPage: false,
+    timeout: SCREENSHOT_TIMEOUT_MS,
+  });
 
   return assetUrl(config, filename);
 }
@@ -392,6 +401,7 @@ async function claimBrawlStarsReward(config = getConfig()) {
         const page = await context.newPage();
 
         page.setDefaultTimeout(ACTION_TIMEOUT_MS);
+        page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 
         try {
           return await claimWithPage(page, config);
@@ -402,7 +412,7 @@ async function claimBrawlStarsReward(config = getConfig()) {
         await browser.close();
       }
     })(),
-    CLAIM_TIMEOUT_MS,
+    config.claimTimeoutMs,
     APP_NAME,
   ).catch(errorResult);
 }
