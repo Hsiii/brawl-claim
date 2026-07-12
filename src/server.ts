@@ -88,6 +88,7 @@ let claimState: ClaimState = {
   profiles: {},
 };
 let activeClaim: Promise<ClaimState> | null = null;
+let cachedConfig: AppConfig | undefined;
 
 function readEnv(name: string, legacyName?: string) {
   return (
@@ -192,6 +193,10 @@ function parseProfiles(dataDir: string, firstAuthStateFile?: string) {
 }
 
 function getConfig(): AppConfig {
+  if (cachedConfig) {
+    return cachedConfig;
+  }
+
   const dataDir =
     readEnv("BRAWL_STARS_CLAIMER_DATA_DIR", "MORNING_SCREENSHOT_DIR") ||
     DEFAULT_DATA_DIR;
@@ -200,7 +205,7 @@ function getConfig(): AppConfig {
     "MORNING_AUTH_STATE_FILE",
   );
 
-  return {
+  cachedConfig = {
     accessPassword: readEnv(
       "BRAWL_STARS_CLAIMER_ACCESS_PASSWORD",
       "MORNING_ACCESS_PASSWORD",
@@ -245,6 +250,7 @@ function getConfig(): AppConfig {
       .map((selector) => selector.trim())
       .filter(Boolean),
   };
+  return cachedConfig;
 }
 
 function statePath(config = getConfig()) {
