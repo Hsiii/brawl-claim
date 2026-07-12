@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_HOST = "127.0.0.1";
@@ -20,13 +20,7 @@ const REMOTE_PROFILE_AUTH_ROOT = "/app/state/profiles";
 const REMOTE_ORACLE_DIR = "/home/ubuntu/bots/oracle";
 const REMOTE_ENV_FILE = "/home/ubuntu/bots/secrets/brawl-stars-claimer.env";
 const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
-
-type SourceConfig = {
-  id: string;
-  label: string;
-  url: string;
-  note: string;
-};
+const STORE_URL = "https://store.supercell.com/brawlstars";
 
 type AuthProfile = {
   authFile: string;
@@ -76,15 +70,6 @@ type StorageState = {
     }>;
   }>;
 };
-
-const sources: SourceConfig[] = [
-  {
-    id: "supercell",
-    label: "Brawl Stars Store",
-    url: "https://store.supercell.com/brawlstars",
-    note: "Login state used by the daily reward claimer.",
-  },
-];
 
 const token = crypto.randomUUID();
 const host = process.env.AUTH_TOOL_HOST || DEFAULT_HOST;
@@ -470,7 +455,7 @@ async function navigateTarget(target: ChromeTarget, url: string) {
   }
 }
 
-async function openSource(source: SourceConfig, profile = profiles[0]) {
+async function openStore(profile = profiles[0]) {
   await ensureChrome(profile);
 
   const blankTarget = (await listChromeTargets()).find(
@@ -478,22 +463,8 @@ async function openSource(source: SourceConfig, profile = profiles[0]) {
   );
 
   return blankTarget
-    ? navigateTarget(blankTarget, source.url)
-    : createChromeTarget(source.url);
-}
-
-async function listPages() {
-  if (!(await isChromeDebugEndpointReady())) {
-    return [];
-  }
-
-  return (await listChromeTargets())
-    .filter((target) => target.type === "page")
-    .map((target) => ({
-      title:
-        target.title || (target.url === "about:blank" ? "Blank" : target.url),
-      url: target.url,
-    }));
+    ? navigateTarget(blankTarget, STORE_URL)
+    : createChromeTarget(STORE_URL);
 }
 
 function normalizeSameSite(value: string | undefined) {
@@ -630,34 +601,19 @@ async function readAuthSummary(profile = profiles[0]) {
       exists: false,
       profileId: profile.id,
       profileLabel: profile.label,
-      path: profile.authFile,
-      remotePath: profile.remoteAuthFile,
     };
   }
 
   const raw = await readFile(profile.authFile, "utf8");
   const parsed = JSON.parse(raw) as {
     cookies?: Array<{ domain?: string; name?: string }>;
-    origins?: Array<{ origin: string }>;
   };
-  const cookieDomains = [
-    ...new Set(
-      parsed.cookies
-        ?.map((cookie) => cookie.domain?.replace(/^\./, ""))
-        .filter(Boolean) ?? [],
-    ),
-  ].sort();
 
   return {
     exists: true,
     profileId: profile.id,
     profileLabel: profile.label,
-    path: profile.authFile,
-    remotePath: profile.remoteAuthFile,
-    size: (await stat(profile.authFile)).size,
     cookieCount: parsed.cookies?.length ?? 0,
-    cookieDomains,
-    origins: parsed.origins?.map((origin) => origin.origin).sort() ?? [],
   };
 }
 
@@ -715,26 +671,39 @@ async function uploadAuthState(profile = profiles[0]) {
   const profileList = profiles.map((item) => item.id).join(",");
   const remoteCommand = `
 set -e
+desired_profiles='${profileList}'
+desired_auth_file='${REMOTE_DEFAULT_AUTH_FILE}'
+remote_env_file='${REMOTE_ENV_FILE}'
+remote_auth_file='${profile.remoteAuthFile}'
+needs_deploy=0
+set_env() {
+  key="$1"
+  value="$2"
+  if grep -q "^$key=" "$remote_env_file"; then
+    current="$(grep "^$key=" "$remote_env_file" | tail -n 1 | cut -d= -f2-)"
+    if [ "$current" != "$value" ]; then
+      sed -i "s#^$key=.*#$key=$value#" "$remote_env_file"
+      needs_deploy=1
+    fi
+  else
+    printf '\\n%s=%s\\n' "$key" "$value" >> "$remote_env_file"
+    needs_deploy=1
+  fi
+}
 container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 if [ -z "$container_id" ]; then
   ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
   container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 fi
-sudo docker exec -u root "$container_id" mkdir -p "$(dirname ${profile.remoteAuthFile})"
-sudo docker cp ${profile.remoteTmpAuthFile} "$container_id:${profile.remoteAuthFile}"
-sudo docker exec -u root "$container_id" chown bun:bun ${profile.remoteAuthFile}
-sudo docker exec -u root "$container_id" chmod 600 ${profile.remoteAuthFile}
-if grep -q '^BRAWL_STARS_CLAIMER_PROFILES=' ${REMOTE_ENV_FILE}; then
-  sed -i 's#^BRAWL_STARS_CLAIMER_PROFILES=.*#BRAWL_STARS_CLAIMER_PROFILES=${profileList}#' ${REMOTE_ENV_FILE}
-else
-  printf '\\nBRAWL_STARS_CLAIMER_PROFILES=${profileList}\\n' >> ${REMOTE_ENV_FILE}
+sudo docker exec -u root "$container_id" mkdir -p "$(dirname "$remote_auth_file")"
+sudo docker cp ${profile.remoteTmpAuthFile} "$container_id:$remote_auth_file"
+sudo docker exec -u root "$container_id" chown bun:bun "$remote_auth_file"
+sudo docker exec -u root "$container_id" chmod 600 "$remote_auth_file"
+set_env BRAWL_STARS_CLAIMER_PROFILES "$desired_profiles"
+set_env BRAWL_STARS_CLAIMER_AUTH_STATE_FILE "$desired_auth_file"
+if [ "$needs_deploy" = "1" ]; then
+  ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
 fi
-if grep -q '^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=' ${REMOTE_ENV_FILE}; then
-  sed -i 's#^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=.*#BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_DEFAULT_AUTH_FILE}#' ${REMOTE_ENV_FILE}
-else
-  printf '\\nBRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_DEFAULT_AUTH_FILE}\\n' >> ${REMOTE_ENV_FILE}
-fi
-${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
 rm -f ${profile.remoteTmpAuthFile}
 `;
 
@@ -773,17 +742,6 @@ function renderPage() {
         `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`,
     )
     .join("");
-  const sourceCards = sources
-    .map(
-      (source) => `<article class="source-card">
-        <div>
-          <h2>${escapeHtml(source.label)}</h2>
-          <p>${escapeHtml(source.note)}</p>
-        </div>
-        <button data-open="${escapeHtml(source.id)}">Open</button>
-      </article>`,
-    )
-    .join("");
 
   return `<!doctype html>
 <html lang="en">
@@ -796,6 +754,7 @@ function renderPage() {
       --color-bg: #111315;
       --color-surface: #191b1f;
       --color-surface-raised: #20242a;
+      --color-code: #0c0e10;
       --color-border: #343842;
       --color-text: #edf4ef;
       --color-muted: #a5abb7;
@@ -817,89 +776,73 @@ function renderPage() {
       font: 15px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     main {
-      width: min(1120px, 100%);
+      width: min(720px, 100%);
       margin: 0 auto;
       padding: var(--space-8);
     }
-    header {
+    header, .status-head {
       display: flex;
       justify-content: space-between;
       gap: var(--space-4);
       align-items: end;
-      margin-bottom: var(--space-6);
     }
+    header { margin-bottom: var(--space-6); }
     h1, h2, p { margin: 0; }
     h1 { font-size: 28px; line-height: 1.2; }
     h2 { font-size: 17px; line-height: 1.3; }
-    p, li { color: var(--color-muted); }
+    p { color: var(--color-muted); }
     a { color: var(--color-accent); }
-    button {
+    button, select {
       min-height: 40px;
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
       background: var(--color-surface-raised);
       color: var(--color-text);
+    }
+    button {
       padding: 0 var(--space-4);
       cursor: pointer;
       white-space: nowrap;
     }
     button:hover { border-color: var(--color-accent); }
-    .actions, .grid {
-      display: grid;
-      gap: var(--space-3);
-    }
     .actions {
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      margin-bottom: var(--space-6);
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: var(--space-3);
     }
     .field {
       display: grid;
       gap: var(--space-2);
-      margin-bottom: var(--space-6);
     }
-    label {
-      color: var(--color-muted);
-    }
-    select {
-      min-height: 40px;
-      border: 1px solid var(--color-border);
-      border-radius: var(--radius-card);
-      background: var(--color-surface-raised);
-      color: var(--color-text);
-      padding: 0 var(--space-3);
-    }
-    .grid {
-      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-      margin-bottom: var(--space-6);
-    }
-    .panel, .source-card {
+    label { color: var(--color-muted); }
+    select { padding: 0 var(--space-3); }
+    .panel {
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
       background: var(--color-surface);
       padding: var(--space-4);
-    }
-    .source-card {
-      display: flex;
-      justify-content: space-between;
+      margin-bottom: var(--space-4);
+      display: grid;
       gap: var(--space-4);
-      align-items: center;
     }
     .status-ok { color: var(--color-success); }
     .status-error { color: var(--color-error); }
     pre {
-      min-height: 160px;
+      min-height: 120px;
       overflow: auto;
       padding: var(--space-4);
       border: 1px solid var(--color-border);
       border-radius: var(--radius-card);
-      background: #0c0e10;
+      background: var(--color-code);
       color: var(--color-text);
+      margin: 0;
+      white-space: pre-wrap;
     }
     @media (max-width: 720px) {
       main { padding: var(--space-4); }
-      header { display: block; }
-      .source-card { display: block; }
-      .source-card button { margin-top: var(--space-3); width: 100%; }
+      header, .status-head { display: grid; align-items: start; }
+      .actions { grid-template-columns: 1fr; }
+      button { width: 100%; }
     }
   </style>
 </head>
@@ -907,50 +850,46 @@ function renderPage() {
   <main>
     <header>
       <div>
-        <h1>Brawl Stars Claimer Auth Setup</h1>
-        <p>Local-only tool. Log into Supercell Store in the dedicated Chrome auth profile, save storage, then upload to Oracle.</p>
+        <h1>Auth Setup</h1>
+        <p>Brawl Stars Store profiles.</p>
       </div>
       <a href="${DASHBOARD_URL}">Claimer</a>
     </header>
 
     <section class="panel">
-      <ol>
-        <li>Choose the profile you are setting up.</li>
-        <li>Open Brawl Stars Store and complete Supercell ID login.</li>
-        <li>Log in directly in the browser window. Do not enter passwords in this page.</li>
-        <li>Click Save Auth State, then Upload To Oracle. This copies only the selected profile storage JSON.</li>
-      </ol>
+      <div class="field">
+        <label for="profile">Profile</label>
+        <select id="profile">${profileOptions}</select>
+      </div>
+      <div class="actions">
+        <button id="open">Open Store</button>
+        <button id="save">Save</button>
+        <button id="upload">Upload</button>
+      </div>
     </section>
-
-    <section class="field">
-      <label for="profile">Profile</label>
-      <select id="profile">${profileOptions}</select>
-    </section>
-
-    <section class="actions">
-      <button id="open-all">Open Store</button>
-      <button id="save">Save Auth State</button>
-      <button id="upload">Upload To Oracle</button>
-      <button id="status">Refresh Status</button>
-      <button id="close">Close Browser</button>
-    </section>
-
-    <section class="grid">${sourceCards}</section>
 
     <section class="panel">
-      <h2>Status</h2>
+      <div class="status-head">
+        <h2>Status</h2>
+        <button id="status">Refresh</button>
+      </div>
       <pre id="output">Ready.</pre>
     </section>
   </main>
 
   <script>
     const token = ${JSON.stringify(token)};
+    const profiles = ${JSON.stringify(profiles.map((profile) => ({ id: profile.id, label: profile.label })))};
     const output = document.querySelector("#output");
+    const profileSelect = document.querySelector("#profile");
     const write = (value, ok = true) => {
-      output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+      output.textContent = value;
       output.className = ok ? "status-ok" : "status-error";
     };
-    const selectedProfile = () => document.querySelector("#profile").value;
+    const selectedProfile = () => profileSelect.value;
+    const selectedProfileLabel = () => {
+      return profiles.find((profile) => profile.id === selectedProfile())?.label || selectedProfile();
+    };
     const call = async (path, body) => {
       const payload = body ? { profile: selectedProfile(), ...body } : undefined;
       const response = await fetch(path, {
@@ -970,37 +909,50 @@ function renderPage() {
 
       return result;
     };
-    const run = async (task) => {
+    const formatStatus = (payload) => {
+      const rows = payload.auth.map((item) => {
+        return item.exists
+          ? item.profileLabel + ": saved (" + item.cookieCount + " cookies)"
+          : item.profileLabel + ": not saved";
+      });
+      rows.unshift(payload.browserOpen ? "Chrome: open" : "Chrome: closed");
+      return rows.join("\\n");
+    };
+    const run = async (task, formatter = (value) => value?.message || "Done.") => {
       try {
         write("Working...");
-        write(await task());
+        write(formatter(await task()));
       } catch (error) {
         write(error instanceof Error ? error.message : String(error), false);
       }
     };
 
-    document.querySelector("#open-all").addEventListener("click", () => {
-      run(() => call("/api/open-all", {}));
+    document.querySelector("#open").addEventListener("click", () => {
+      run(
+        () => call("/api/open", {}),
+        () => "Opened store for " + selectedProfileLabel() + "."
+      );
     });
     document.querySelector("#save").addEventListener("click", () => {
-      run(() => call("/api/save", {}));
+      run(
+        () => call("/api/save", {}),
+        (value) => "Saved " + value.saved.profileLabel + " locally (" + value.saved.cookieCount + " cookies)."
+      );
     });
     document.querySelector("#upload").addEventListener("click", () => {
-      run(() => call("/api/upload", {}));
+      run(
+        () => call("/api/upload", {}),
+        (value) => "Uploaded " + value.uploaded.profileLabel + " to Oracle."
+      );
     });
     document.querySelector("#status").addEventListener("click", () => {
-      run(() => call("/api/status"));
+      run(() => call("/api/status"), formatStatus);
     });
-    document.querySelector("#close").addEventListener("click", () => {
-      run(() => call("/api/close", {}));
-    });
-    document.querySelectorAll("[data-open]").forEach((button) => {
-      button.addEventListener("click", () => {
-        run(() => call("/api/open", { source: button.dataset.open }));
-      });
+    profileSelect.addEventListener("change", () => {
+      run(() => call("/api/status"), formatStatus);
     });
 
-    run(() => call("/api/status"));
+    run(() => call("/api/status"), formatStatus);
   </script>
 </body>
 </html>`;
@@ -1008,7 +960,7 @@ function renderPage() {
 
 async function readJsonRequest(request: Request) {
   try {
-    return (await request.json()) as { profile?: string; source?: string };
+    return (await request.json()) as { profile?: string };
   } catch {
     return {};
   }
@@ -1039,56 +991,25 @@ async function handleRequest(request: Request) {
 
       return json({
         browserOpen,
-        pages: browserOpen ? await listPages() : [],
         auth: await Promise.all(
           profiles.map((profile) => readAuthSummary(profile)),
         ),
-        activeProfileId,
         profiles: profiles.map((profile) => ({
           id: profile.id,
           label: profile.label,
-          authFile: profile.authFile,
-          profileDir: profile.profileDir,
-          remoteAuthFile: profile.remoteAuthFile,
         })),
-        chromeAppName,
-        chromePath,
-        chromeLauncher,
-        cdpPort,
-        remoteHost,
       });
     }
 
     if (request.method === "POST" && url.pathname === "/api/open") {
       const body = await readJsonRequest(request);
       const profile = findProfile(body.profile);
-      const source = sources.find((item) => item.id === body.source);
 
-      if (!source) {
-        return json({ error: "Unknown source" }, 400);
-      }
-
-      await openSource(source, profile);
+      await openStore(profile);
 
       return json({
-        opened: source.label,
+        opened: true,
         profile: profile.label,
-        pages: await listPages(),
-      });
-    }
-
-    if (request.method === "POST" && url.pathname === "/api/open-all") {
-      const body = await readJsonRequest(request);
-      const profile = findProfile(body.profile);
-
-      for (const source of sources) {
-        await openSource(source, profile);
-      }
-
-      return json({
-        opened: sources.map((source) => source.label),
-        profile: profile.label,
-        pages: await listPages(),
       });
     }
 
