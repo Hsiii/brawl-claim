@@ -1,18 +1,22 @@
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3199;
 const DEFAULT_AUTH_FILE = ".data/auth.json";
+const DEFAULT_AUTH_DIR = ".data/auth";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
+const DEFAULT_PROFILE_ROOT = ".data/auth-browser-profiles";
+const DEFAULT_PROFILES = "me,friend1,friend2";
 const DEFAULT_REMOTE_HOST = "oracle";
 const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_CDP_PORT = 9322;
-const REMOTE_TMP_AUTH_FILE = "/tmp/brawl-stars-claimer-auth.json";
-const REMOTE_AUTH_FILE = "/app/state/auth.json";
+const REMOTE_TMP_AUTH_FILE_PREFIX = "/tmp/brawl-stars-claimer-auth";
+const REMOTE_DEFAULT_AUTH_FILE = "/app/state/auth.json";
+const REMOTE_PROFILE_AUTH_ROOT = "/app/state/profiles";
 const REMOTE_ORACLE_DIR = "/home/ubuntu/bots/oracle";
 const REMOTE_ENV_FILE = "/home/ubuntu/bots/secrets/brawl-stars-claimer.env";
 const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
@@ -22,6 +26,15 @@ type SourceConfig = {
   label: string;
   url: string;
   note: string;
+};
+
+type AuthProfile = {
+  authFile: string;
+  id: string;
+  label: string;
+  profileDir: string;
+  remoteAuthFile: string;
+  remoteTmpAuthFile: string;
 };
 
 type ChromeTarget = {
@@ -76,10 +89,6 @@ const sources: SourceConfig[] = [
 const token = crypto.randomUUID();
 const host = process.env.AUTH_TOOL_HOST || DEFAULT_HOST;
 const port = Number(process.env.AUTH_TOOL_PORT || DEFAULT_PORT);
-const authFile = resolve(process.env.AUTH_TOOL_AUTH_FILE || DEFAULT_AUTH_FILE);
-const profileDir = resolve(
-  process.env.AUTH_TOOL_PROFILE_DIR || DEFAULT_PROFILE_DIR,
-);
 const remoteHost = process.env.AUTH_TOOL_REMOTE_HOST || DEFAULT_REMOTE_HOST;
 const chromeAppName =
   process.env.AUTH_TOOL_CHROME_APP_NAME || DEFAULT_CHROME_APP_NAME;
@@ -88,6 +97,95 @@ const cdpPort = Number(process.env.AUTH_TOOL_CDP_PORT || DEFAULT_CDP_PORT);
 
 let chromeProcess: ReturnType<typeof Bun.spawn> | undefined;
 let chromeLauncher = "not-started";
+let activeProfileId: string | undefined;
+
+function normalizeProfileId(value: string) {
+  return (
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "me"
+  );
+}
+
+function profileDisplayName(id: string) {
+  if (id === "me") {
+    return "Me";
+  }
+
+  return id
+    .split(/[-_]+/)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() || ""}${part.slice(1)}`)
+    .join(" ");
+}
+
+function profileEnvKey(profileId: string, suffix: string) {
+  const envId = profileId.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+
+  return `AUTH_TOOL_${envId}_${suffix}`;
+}
+
+function parseProfileEntry(entry: string, index: number) {
+  const [rawId, ...labelParts] = entry.split(":");
+  const id = normalizeProfileId(rawId || `profile-${index + 1}`);
+  const label = labelParts.join(":").trim() || profileDisplayName(id);
+
+  return {
+    id,
+    label,
+  };
+}
+
+function buildProfiles(): AuthProfile[] {
+  const rawProfiles =
+    process.env.AUTH_TOOL_PROFILES ||
+    process.env.BRAWL_STARS_CLAIMER_PROFILES ||
+    DEFAULT_PROFILES;
+  const seenIds = new Set<string>();
+  const parsedProfiles = rawProfiles
+    .split(",")
+    .map((entry, index) => parseProfileEntry(entry, index))
+    .filter((profile) => {
+      if (seenIds.has(profile.id)) {
+        return false;
+      }
+
+      seenIds.add(profile.id);
+      return true;
+    });
+  const profiles =
+    parsedProfiles.length > 0
+      ? parsedProfiles
+      : [{ id: "me", label: "Me" }];
+
+  return profiles.map((profile, index) => {
+    const authFile =
+      process.env[profileEnvKey(profile.id, "AUTH_FILE")] ||
+      (index === 0 ? process.env.AUTH_TOOL_AUTH_FILE : undefined) ||
+      (index === 0 ? DEFAULT_AUTH_FILE : join(DEFAULT_AUTH_DIR, `${profile.id}.json`));
+    const profileDir =
+      process.env[profileEnvKey(profile.id, "PROFILE_DIR")] ||
+      (index === 0 ? process.env.AUTH_TOOL_PROFILE_DIR : undefined) ||
+      (index === 0 ? DEFAULT_PROFILE_DIR : join(DEFAULT_PROFILE_ROOT, profile.id));
+    const remoteAuthFile =
+      process.env[profileEnvKey(profile.id, "REMOTE_AUTH_FILE")] ||
+      (index === 0
+        ? REMOTE_DEFAULT_AUTH_FILE
+        : `${REMOTE_PROFILE_AUTH_ROOT}/${profile.id}/auth.json`);
+
+    return {
+      ...profile,
+      authFile: resolve(authFile),
+      profileDir: resolve(profileDir),
+      remoteAuthFile,
+      remoteTmpAuthFile: `${REMOTE_TMP_AUTH_FILE_PREFIX}-${profile.id}.json`,
+    };
+  });
+}
+
+const profiles = buildProfiles();
 
 function escapeHtml(value: string) {
   return value
@@ -118,11 +216,29 @@ function assertAuthorized(request: Request) {
   return true;
 }
 
-async function ensureChrome() {
-  await mkdir(profileDir, { recursive: true });
+function findProfile(profileId: string | undefined) {
+  if (!profileId) {
+    return profiles[0];
+  }
+
+  const normalizedId = normalizeProfileId(profileId);
+
+  return profiles.find((profile) => profile.id === normalizedId) || profiles[0];
+}
+
+async function ensureChrome(profile = profiles[0]) {
+  if (
+    activeProfileId &&
+    activeProfileId !== profile.id &&
+    (await isChromeDebugEndpointReady())
+  ) {
+    await closeChrome();
+  }
+
+  await mkdir(profile.profileDir, { recursive: true });
   const chromeArgs = [
     `--remote-debugging-port=${cdpPort}`,
-    `--user-data-dir=${profileDir}`,
+    `--user-data-dir=${profile.profileDir}`,
     "--remote-allow-origins=*",
     "--no-first-run",
     "--no-default-browser-check",
@@ -153,6 +269,7 @@ async function ensureChrome() {
   }
 
   await waitForChromeDebugEndpoint();
+  activeProfileId = profile.id;
 }
 
 async function isChromeDebugEndpointReady() {
@@ -353,8 +470,8 @@ async function navigateTarget(target: ChromeTarget, url: string) {
   }
 }
 
-async function openSource(source: SourceConfig) {
-  await ensureChrome();
+async function openSource(source: SourceConfig, profile = profiles[0]) {
+  await ensureChrome(profile);
 
   const blankTarget = (await listChromeTargets()).find(
     (target) => target.type === "page" && target.url === "about:blank",
@@ -483,8 +600,8 @@ async function readOpenTargetLocalStorage() {
   );
 }
 
-async function readChromeStorageState(): Promise<StorageState> {
-  await ensureChrome();
+async function readChromeStorageState(profile = profiles[0]): Promise<StorageState> {
+  await ensureChrome(profile);
 
   const cdp = await CdpConnection.connect(await getBrowserWebSocketUrl());
 
@@ -507,15 +624,18 @@ async function readChromeStorageState(): Promise<StorageState> {
   }
 }
 
-async function readAuthSummary() {
-  if (!existsSync(authFile)) {
+async function readAuthSummary(profile = profiles[0]) {
+  if (!existsSync(profile.authFile)) {
     return {
       exists: false,
-      path: authFile,
+      profileId: profile.id,
+      profileLabel: profile.label,
+      path: profile.authFile,
+      remotePath: profile.remoteAuthFile,
     };
   }
 
-  const raw = await readFile(authFile, "utf8");
+  const raw = await readFile(profile.authFile, "utf8");
   const parsed = JSON.parse(raw) as {
     cookies?: Array<{ domain?: string; name?: string }>;
     origins?: Array<{ origin: string }>;
@@ -530,22 +650,25 @@ async function readAuthSummary() {
 
   return {
     exists: true,
-    path: authFile,
-    size: (await stat(authFile)).size,
+    profileId: profile.id,
+    profileLabel: profile.label,
+    path: profile.authFile,
+    remotePath: profile.remoteAuthFile,
+    size: (await stat(profile.authFile)).size,
     cookieCount: parsed.cookies?.length ?? 0,
     cookieDomains,
     origins: parsed.origins?.map((origin) => origin.origin).sort() ?? [],
   };
 }
 
-async function saveAuthState() {
-  const storageState = await readChromeStorageState();
+async function saveAuthState(profile = profiles[0]) {
+  const storageState = await readChromeStorageState(profile);
 
-  await mkdir(dirname(authFile), { recursive: true });
-  await writeFile(authFile, `${JSON.stringify(storageState, null, 2)}\n`);
-  await chmod(authFile, 0o600);
+  await mkdir(dirname(profile.authFile), { recursive: true });
+  await writeFile(profile.authFile, `${JSON.stringify(storageState, null, 2)}\n`);
+  await chmod(profile.authFile, 0o600);
 
-  return readAuthSummary();
+  return readAuthSummary(profile);
 }
 
 async function runCommand(command: string[], options?: { input?: string }) {
@@ -578,17 +701,18 @@ async function runCommand(command: string[], options?: { input?: string }) {
   };
 }
 
-async function uploadAuthState() {
-  if (!existsSync(authFile)) {
+async function uploadAuthState(profile = profiles[0]) {
+  if (!existsSync(profile.authFile)) {
     throw new Error("No auth file saved yet. Save first, then upload.");
   }
 
   await runCommand([
     "scp",
-    authFile,
-    `${remoteHost}:${REMOTE_TMP_AUTH_FILE}`,
+    profile.authFile,
+    `${remoteHost}:${profile.remoteTmpAuthFile}`,
   ]);
 
+  const profileList = profiles.map((item) => item.id).join(",");
   const remoteCommand = `
 set -e
 container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
@@ -596,23 +720,31 @@ if [ -z "$container_id" ]; then
   ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
   container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 fi
-sudo docker cp ${REMOTE_TMP_AUTH_FILE} "$container_id:${REMOTE_AUTH_FILE}"
-sudo docker exec -u root "$container_id" chown bun:bun ${REMOTE_AUTH_FILE}
-sudo docker exec -u root "$container_id" chmod 600 ${REMOTE_AUTH_FILE}
-if grep -q '^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=' ${REMOTE_ENV_FILE}; then
-  sed -i 's#^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=.*#BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}#' ${REMOTE_ENV_FILE}
+sudo docker exec -u root "$container_id" mkdir -p "$(dirname ${profile.remoteAuthFile})"
+sudo docker cp ${profile.remoteTmpAuthFile} "$container_id:${profile.remoteAuthFile}"
+sudo docker exec -u root "$container_id" chown bun:bun ${profile.remoteAuthFile}
+sudo docker exec -u root "$container_id" chmod 600 ${profile.remoteAuthFile}
+if grep -q '^BRAWL_STARS_CLAIMER_PROFILES=' ${REMOTE_ENV_FILE}; then
+  sed -i 's#^BRAWL_STARS_CLAIMER_PROFILES=.*#BRAWL_STARS_CLAIMER_PROFILES=${profileList}#' ${REMOTE_ENV_FILE}
 else
-  printf '\\nBRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_AUTH_FILE}\\n' >> ${REMOTE_ENV_FILE}
+  printf '\\nBRAWL_STARS_CLAIMER_PROFILES=${profileList}\\n' >> ${REMOTE_ENV_FILE}
+fi
+if grep -q '^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=' ${REMOTE_ENV_FILE}; then
+  sed -i 's#^BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=.*#BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_DEFAULT_AUTH_FILE}#' ${REMOTE_ENV_FILE}
+else
+  printf '\\nBRAWL_STARS_CLAIMER_AUTH_STATE_FILE=${REMOTE_DEFAULT_AUTH_FILE}\\n' >> ${REMOTE_ENV_FILE}
 fi
 ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
-rm -f ${REMOTE_TMP_AUTH_FILE}
+rm -f ${profile.remoteTmpAuthFile}
 `;
 
   await runCommand(["ssh", remoteHost, remoteCommand]);
 
   return {
     remoteHost,
-    remoteAuthFile: REMOTE_AUTH_FILE,
+    profileId: profile.id,
+    profileLabel: profile.label,
+    remoteAuthFile: profile.remoteAuthFile,
     dashboardUrl: DASHBOARD_URL,
   };
 }
@@ -631,9 +763,16 @@ async function closeChrome() {
   chromeProcess?.kill();
   chromeProcess = undefined;
   chromeLauncher = "not-started";
+  activeProfileId = undefined;
 }
 
 function renderPage() {
+  const profileOptions = profiles
+    .map(
+      (profile) =>
+        `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`,
+    )
+    .join("");
   const sourceCards = sources
     .map(
       (source) => `<article class="source-card">
@@ -713,6 +852,22 @@ function renderPage() {
       grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
       margin-bottom: var(--space-6);
     }
+    .field {
+      display: grid;
+      gap: var(--space-2);
+      margin-bottom: var(--space-6);
+    }
+    label {
+      color: var(--color-muted);
+    }
+    select {
+      min-height: 40px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: var(--color-surface-raised);
+      color: var(--color-text);
+      padding: 0 var(--space-3);
+    }
     .grid {
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
       margin-bottom: var(--space-6);
@@ -760,11 +915,16 @@ function renderPage() {
 
     <section class="panel">
       <ol>
+        <li>Choose the profile you are setting up.</li>
         <li>Open Brawl Stars Store and complete Supercell ID login.</li>
-        <li>Log in directly in the browser windows. Do not enter passwords in this page.</li>
-        <li>Click Save Auth State after all sites are logged in.</li>
-        <li>Click Upload To Oracle. This copies only the Playwright storage JSON.</li>
+        <li>Log in directly in the browser window. Do not enter passwords in this page.</li>
+        <li>Click Save Auth State, then Upload To Oracle. This copies only the selected profile storage JSON.</li>
       </ol>
+    </section>
+
+    <section class="field">
+      <label for="profile">Profile</label>
+      <select id="profile">${profileOptions}</select>
     </section>
 
     <section class="actions">
@@ -790,23 +950,25 @@ function renderPage() {
       output.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
       output.className = ok ? "status-ok" : "status-error";
     };
+    const selectedProfile = () => document.querySelector("#profile").value;
     const call = async (path, body) => {
+      const payload = body ? { profile: selectedProfile(), ...body } : undefined;
       const response = await fetch(path, {
-        method: body ? "POST" : "GET",
+        method: payload ? "POST" : "GET",
         headers: {
           "content-type": "application/json",
           "x-auth-tool-token": token
         },
-        body: body ? JSON.stringify(body) : undefined
+        body: payload ? JSON.stringify(payload) : undefined
       });
       const text = await response.text();
-      const payload = text ? JSON.parse(text) : null;
+      const result = text ? JSON.parse(text) : null;
 
       if (!response.ok) {
-        throw new Error(payload?.error || response.statusText);
+        throw new Error(result?.error || response.statusText);
       }
 
-      return payload;
+      return result;
     };
     const run = async (task) => {
       try {
@@ -844,6 +1006,14 @@ function renderPage() {
 </html>`;
 }
 
+async function readJsonRequest(request: Request) {
+  try {
+    return (await request.json()) as { profile?: string; source?: string };
+  } catch {
+    return {};
+  }
+}
+
 async function handleRequest(request: Request) {
   const url = new URL(request.url);
 
@@ -870,52 +1040,73 @@ async function handleRequest(request: Request) {
       return json({
         browserOpen,
         pages: browserOpen ? await listPages() : [],
-        auth: await readAuthSummary(),
+        auth: await Promise.all(
+          profiles.map((profile) => readAuthSummary(profile)),
+        ),
+        activeProfileId,
+        profiles: profiles.map((profile) => ({
+          id: profile.id,
+          label: profile.label,
+          authFile: profile.authFile,
+          profileDir: profile.profileDir,
+          remoteAuthFile: profile.remoteAuthFile,
+        })),
         chromeAppName,
         chromePath,
         chromeLauncher,
-        profileDir,
         cdpPort,
         remoteHost,
       });
     }
 
     if (request.method === "POST" && url.pathname === "/api/open") {
-      const body = (await request.json()) as { source?: string };
+      const body = await readJsonRequest(request);
+      const profile = findProfile(body.profile);
       const source = sources.find((item) => item.id === body.source);
 
       if (!source) {
         return json({ error: "Unknown source" }, 400);
       }
 
-      await openSource(source);
+      await openSource(source, profile);
 
       return json({
         opened: source.label,
+        profile: profile.label,
         pages: await listPages(),
       });
     }
 
     if (request.method === "POST" && url.pathname === "/api/open-all") {
+      const body = await readJsonRequest(request);
+      const profile = findProfile(body.profile);
+
       for (const source of sources) {
-        await openSource(source);
+        await openSource(source, profile);
       }
 
       return json({
         opened: sources.map((source) => source.label),
+        profile: profile.label,
         pages: await listPages(),
       });
     }
 
     if (request.method === "POST" && url.pathname === "/api/save") {
+      const body = await readJsonRequest(request);
+      const profile = findProfile(body.profile);
+
       return json({
-        saved: await saveAuthState(),
+        saved: await saveAuthState(profile),
       });
     }
 
     if (request.method === "POST" && url.pathname === "/api/upload") {
+      const body = await readJsonRequest(request);
+      const profile = findProfile(body.profile);
+
       return json({
-        uploaded: await uploadAuthState(),
+        uploaded: await uploadAuthState(profile),
       });
     }
 
