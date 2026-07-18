@@ -13,6 +13,7 @@ const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
 const STORE_SETTLE_MS = 75_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
+const CLEANUP_TIMEOUT_MS = 15_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
@@ -639,10 +640,18 @@ async function claimBrawlStarsReward(
             profile,
           });
         } finally {
-          await context.close();
+          await withTimeout(
+            context.close(),
+            CLEANUP_TIMEOUT_MS,
+            "Browser context cleanup",
+          ).catch(() => undefined);
         }
       } finally {
-        await browser.close();
+        await withTimeout(
+          browser.close(),
+          CLEANUP_TIMEOUT_MS,
+          "Browser cleanup",
+        ).catch(() => undefined);
       }
     })(),
     config.claimTimeoutMs,
