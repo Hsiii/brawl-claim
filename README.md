@@ -53,6 +53,11 @@ bun run claim -- --profile me
 For Docker, scheduling, multiple profiles, production authentication, and
 Discord operator setup, see [Self-hosting](docs/SELF_HOSTING.md).
 
+To share BrawlClaim with friends, prefer a separate private instance for each
+person. A trusted operator can also host isolated profiles for several people;
+see [Let friends use it](docs/SELF_HOSTING.md#let-friends-use-it) for both paths
+and the security tradeoff.
+
 ## Development
 
 ```bash

@@ -1,5 +1,77 @@
 # Self-hosting BrawlClaim
 
+## Let friends use it
+
+The safest setup is for each friend to run their own private instance. Send them
+the repository URL and have them follow [Local setup](../README.md#local-setup),
+then this guide if they want Docker or Discord. Each person keeps their own
+`.env.local` and `.data/` directory and signs in directly on Supercell's website.
+
+For an always-on personal instance, set these values after copying
+`.env.example`:
+
+```env
+BRAWL_CLAIM_ENABLED=true
+BRAWL_STARS_CLAIMER_PROFILES=me
+BRAWL_STARS_CLAIMER_ACCESS_USERNAME=operator
+BRAWL_STARS_CLAIMER_ACCESS_PASSWORD=<random-password>
+```
+
+Then authenticate and start it:
+
+```bash
+bun run auth:setup
+bun run claim -- --profile me
+bun run start
+```
+
+The dashboard is at `http://localhost:3100`. Do not expose it directly to the
+internet: use HTTPS through a trusted reverse proxy or private network first.
+For an always-on Docker deployment instead, follow
+[Run with Docker Compose](#run-with-docker-compose) after authentication.
+
+Alternatively, one trusted operator can host several friends on one instance.
+This is more convenient, but the operator's state volume contains reusable
+Supercell browser sessions for every account. Only use this model when every
+account owner understands and accepts that trust relationship.
+
+Choose stable profile IDs and configure all of them in `.env.local`:
+
+```env
+BRAWL_STARS_CLAIMER_PROFILES=me:Me,alice:Alice,bob:Bob
+```
+
+On the operator's computer, install the local requirements once and run:
+
+```bash
+bun install --frozen-lockfile
+bunx playwright install chromium
+bun run auth:setup
+```
+
+Select one profile at a time. Its owner should complete the Supercell sign-in
+and click **Save** without giving the operator their email code. The helper saves
+the first profile to `.data/auth.json` and later profiles to files such as
+`.data/auth/alice.json` and `.data/auth/bob.json`.
+
+After starting Compose, copy each saved session into its matching container
+path:
+
+```bash
+docker compose up -d --build
+docker compose cp .data/auth.json brawl-claimer:/app/state/auth.json
+docker compose exec -u root brawl-claimer mkdir -p /app/state/profiles/alice /app/state/profiles/bob
+docker compose cp .data/auth/alice.json brawl-claimer:/app/state/profiles/alice/auth.json
+docker compose cp .data/auth/bob.json brawl-claimer:/app/state/profiles/bob/auth.json
+docker compose exec -u root brawl-claimer chown -R bun:bun /app/state
+docker compose exec -u root brawl-claimer chmod 600 /app/state/auth.json /app/state/profiles/alice/auth.json /app/state/profiles/bob/auth.json
+docker compose restart brawl-claimer
+```
+
+Run `docker compose exec -T brawl-claimer bun run claim` to check every profile,
+or add `-- --profile alice` to check only Alice. If Discord is enabled, generate
+one link code per profile and privately give each code to its account owner.
+
 ## Configure the service
 
 Copy the sample environment and replace every credential placeholder you use:
