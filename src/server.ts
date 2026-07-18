@@ -235,10 +235,18 @@ function getConfig(): AppConfig {
   const authStateFile = readEnv("BRAWL_STARS_CLAIMER_AUTH_STATE_FILE");
   const accessPassword = readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD");
   const accessUsername = readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME");
+  const discordBotToken = readEnv("BRAWL_CLAIM_DISCORD_BOT_TOKEN");
+  const discordPublicKey = readEnv("BRAWL_CLAIM_DISCORD_PUBLIC_KEY");
 
   if (Boolean(accessPassword) !== Boolean(accessUsername)) {
     throw new Error(
       "BRAWL_STARS_CLAIMER_ACCESS_USERNAME and BRAWL_STARS_CLAIMER_ACCESS_PASSWORD must be configured together.",
+    );
+  }
+
+  if (Boolean(discordBotToken) !== Boolean(discordPublicKey)) {
+    throw new Error(
+      "BRAWL_CLAIM_DISCORD_BOT_TOKEN and BRAWL_CLAIM_DISCORD_PUBLIC_KEY must be configured together.",
     );
   }
 
@@ -257,8 +265,8 @@ function getConfig(): AppConfig {
       Number(readEnv("BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS")) ||
       DEFAULT_CLAIM_TIMEOUT_MS,
     dataDir,
-    discordBotToken: readEnv("BRAWL_CLAIM_DISCORD_BOT_TOKEN"),
-    discordPublicKey: readEnv("BRAWL_CLAIM_DISCORD_PUBLIC_KEY"),
+    discordBotToken,
+    discordPublicKey,
     intervalMs:
       Number(readEnv("BRAWL_STARS_CLAIMER_INTERVAL_MINUTES")) *
         60 *
@@ -1157,7 +1165,13 @@ function getBasicAuthCredentials(request: Request) {
     return null;
   }
 
-  const decoded = atob(authorization.slice("Basic ".length));
+  let decoded: string;
+
+  try {
+    decoded = atob(authorization.slice("Basic ".length));
+  } catch {
+    return null;
+  }
   const separatorIndex = decoded.indexOf(":");
 
   if (separatorIndex === -1) {
@@ -1505,7 +1519,7 @@ async function handleRequest(request: Request) {
   if (pathname === "/api/health") {
     return jsonResponse({
       ok: true,
-      claiming: Boolean(activeClaim) || claimState.claiming,
+      claiming: Boolean(activeClaim) || (await isClaimLockActive(config)),
       profileCount: config.profiles.length,
     });
   }

@@ -4,7 +4,15 @@ import {
   randomBytes,
   verify as verifySignature,
 } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
@@ -16,6 +24,8 @@ const DISCORD_PUBLIC_KEY_PREFIX = Buffer.from(
 );
 const LINKS_FILE = "discord-links.json";
 const LINK_CODES_FILE = "discord-link-codes.json";
+const LINK_LOCK_FILE = "discord-links.lock";
+const LINK_LOCK_MAX_AGE_MS = 30_000;
 
 export type DiscordProfile = {
   id: string;
@@ -97,6 +107,10 @@ function linkCodesPath(dataDir: string) {
   return join(dataDir, LINK_CODES_FILE);
 }
 
+function linkLockPath(dataDir: string) {
+  return join(dataDir, LINK_LOCK_FILE);
+}
+
 function isMissingFile(error: unknown) {
   return Boolean(
     error &&
@@ -137,8 +151,58 @@ async function writeJsonAtomic(path: string, value: unknown) {
   }
 }
 
-function withLinkMutation<T>(operation: () => Promise<T>) {
-  const result = linkMutationQueue.then(operation, operation);
+async function acquireLinkLock(dataDir: string) {
+  const path = linkLockPath(dataDir);
+
+  await mkdir(dirname(path), { recursive: true });
+
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+
+      return async () => {
+        await handle.close().catch(() => undefined);
+        await unlink(path).catch((error) => {
+          if (!isMissingFile(error)) {
+            throw error;
+          }
+        });
+      };
+    } catch (error) {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        (error as { code?: string }).code !== "EEXIST"
+      ) {
+        throw error;
+      }
+
+      const lockStat = await stat(path).catch(() => undefined);
+
+      if (lockStat && Date.now() - lockStat.mtimeMs > LINK_LOCK_MAX_AGE_MS) {
+        await unlink(path).catch(() => undefined);
+        continue;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  throw new Error("Discord profile links are busy. Try again in a moment.");
+}
+
+function withLinkMutation<T>(dataDir: string, operation: () => Promise<T>) {
+  const lockedOperation = async () => {
+    const release = await acquireLinkLock(dataDir);
+
+    try {
+      return await operation();
+    } finally {
+      await release();
+    }
+  };
+  const result = linkMutationQueue.then(lockedOperation, lockedOperation);
 
   linkMutationQueue = result.then(
     () => undefined,
@@ -169,12 +233,13 @@ export async function createDiscordLinkCode({
   profileId: string;
   ttlMinutes?: number;
 }) {
-  return withLinkMutation(async () => {
+  return withLinkMutation(dataDir, async () => {
     const path = linkCodesPath(dataDir);
     const stored = await readJson(path, emptyLinkCodes());
     const now = Date.now();
     const code = randomBytes(8).toString("base64url");
-    const expiresAt = new Date(now + ttlMinutes * 60_000).toISOString();
+    const safeTtlMinutes = Math.min(Math.max(ttlMinutes, 1), 24 * 60);
+    const expiresAt = new Date(now + safeTtlMinutes * 60_000).toISOString();
     const codes = stored.codes.filter(
       (candidate) =>
         Date.parse(candidate.expiresAt) > now && candidate.profileId !== profileId,
@@ -198,7 +263,7 @@ async function consumeDiscordLinkCode({
   discordUserId: string;
   profiles: DiscordProfile[];
 }) {
-  return withLinkMutation(async () => {
+  return withLinkMutation(dataDir, async () => {
     const now = Date.now();
     const codes = await readJson(linkCodesPath(dataDir), emptyLinkCodes());
     const activeCodes = codes.codes.filter(
@@ -250,7 +315,7 @@ async function consumeDiscordLinkCode({
 }
 
 async function unlinkDiscordUser(dataDir: string, discordUserId: string) {
-  return withLinkMutation(async () => {
+  return withLinkMutation(dataDir, async () => {
     const path = linksPath(dataDir);
     const links = await readJson(path, emptyLinks());
     const entry = Object.entries(links.profiles).find(
