@@ -11,6 +11,7 @@ ARG INSTALL_PLAYWRIGHT_BROWSERS=true
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 RUN if [ "$INSTALL_PLAYWRIGHT_BROWSERS" = "true" ]; then bunx playwright install --with-deps chromium; fi
+RUN apt-get update && apt-get install -y --no-install-recommends xauth && rm -rf /var/lib/apt/lists/*
 
 COPY src ./src
 COPY tsconfig.json ./tsconfig.json
