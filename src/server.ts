@@ -1143,9 +1143,14 @@ if (process.argv.some((argument) => CLAIM_FLAGS.has(argument))) {
   const results = profileId
     ? [nextState.profiles[normalizeProfileId(profileId)]?.result]
     : Object.values(nextState.profiles).map((profile) => profile.result);
+  const exitCode = results.some((result) => result?.status === "error")
+    ? 1
+    : results.some((result) => result?.status === "login_required")
+      ? 2
+      : 0;
 
   console.log(JSON.stringify(output, null, 2));
-  process.exit(results.some((result) => result?.status === "error") ? 1 : 0);
+  process.exit(exitCode);
 }
 
 const port = Number(process.env.PORT || DEFAULT_PORT);
