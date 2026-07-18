@@ -35,4 +35,9 @@ if (!output("git", ["remote"]).split("\n").includes("origin")) {
 }
 
 run("git", ["push", "origin", branch]);
+
+if (output("git", ["remote"]).split("\n").includes("platform")) {
+  run("git", ["push", "platform", branch]);
+}
+
 run("ssh", [remoteHost, `${remoteDeployRoot}/scripts/deploy-${service}`]);
