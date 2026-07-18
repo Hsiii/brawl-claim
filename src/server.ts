@@ -10,6 +10,7 @@ const DEFAULT_PORT = 3100;
 const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
+const SELECTOR_PROBE_TIMEOUT_MS = 2_000;
 const NAVIGATION_TIMEOUT_MS = 45_000;
 const STORE_RELOAD_GRACE_MS = 5_000;
 const SCREENSHOT_TIMEOUT_MS = 30_000;
@@ -430,7 +431,13 @@ async function firstVisibleLocator(page: Page, selectors: string[]) {
     const locator = page.locator(selector).first();
 
     try {
-      if (await locator.isVisible({ timeout: 1_500 })) {
+      if (
+        await withTimeout(
+          locator.isVisible(),
+          SELECTOR_PROBE_TIMEOUT_MS,
+          `Selector probe ${selector}`,
+        )
+      ) {
         return locator;
       }
     } catch {
