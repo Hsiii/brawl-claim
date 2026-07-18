@@ -1,5 +1,13 @@
 import { timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type { Page } from "playwright";
@@ -20,6 +28,7 @@ const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
 const STATE_FILE = "claim.json";
+const LOCK_FILE = "claim.lock";
 const DEFAULT_PROFILE_ID = "me";
 const CLAIM_FLAGS = new Set(["--claim-once"]);
 const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
@@ -92,6 +101,13 @@ let claimState: ClaimState = {
 };
 let activeClaim: Promise<ClaimState> | null = null;
 let cachedConfig: AppConfig | undefined;
+
+class ClaimInProgressError extends Error {
+  constructor() {
+    super("Another BrawlClaim process is already running a claim.");
+    this.name = "ClaimInProgressError";
+  }
+}
 
 function readEnv(name: string) {
   return process.env[name]?.trim() || undefined;
@@ -246,6 +262,10 @@ function statePath(config = getConfig()) {
   return join(config.dataDir, STATE_FILE);
 }
 
+function lockPath(config = getConfig()) {
+  return join(config.dataDir, LOCK_FILE);
+}
+
 function assetPath(config: AppConfig, filename: string) {
   return join(config.dataDir, filename);
 }
@@ -376,8 +396,110 @@ async function loadClaimState(config = getConfig()) {
 }
 
 async function saveClaimState(nextState: ClaimState, config = getConfig()) {
-  await mkdir(dirname(statePath(config)), { recursive: true });
-  await writeFile(statePath(config), JSON.stringify(nextState, null, 2));
+  const path = statePath(config);
+  const temporaryPath = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
+
+  await mkdir(dirname(path), { recursive: true });
+
+  try {
+    await writeFile(temporaryPath, JSON.stringify(nextState, null, 2), {
+      mode: 0o600,
+    });
+    await rename(temporaryPath, path);
+  } finally {
+    await unlink(temporaryPath).catch((error) => {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        (error as { code?: string }).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+    });
+  }
+}
+
+function claimLockMaxAge(config: AppConfig) {
+  return config.claimTimeoutMs * Math.max(config.profiles.length, 1) + 60_000;
+}
+
+async function isClaimLockActive(config = getConfig()) {
+  try {
+    const lockStat = await stat(lockPath(config));
+
+    return Date.now() - lockStat.mtimeMs <= claimLockMaxAge(config);
+  } catch (error) {
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code?: string }).code === "ENOENT"
+    ) {
+      return false;
+    }
+
+    throw error;
+  }
+}
+
+async function acquireClaimLock(config = getConfig()) {
+  const path = lockPath(config);
+
+  await mkdir(dirname(path), { recursive: true });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const handle = await open(path, "wx", 0o600);
+      let released = false;
+
+      try {
+        await handle.writeFile(
+          `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() })}\n`,
+        );
+      } catch (error) {
+        await handle.close().catch(() => undefined);
+        await unlink(path).catch(() => undefined);
+        throw error;
+      }
+
+      return async () => {
+        if (released) {
+          return;
+        }
+
+        released = true;
+        await handle.close().catch(() => undefined);
+        await unlink(path).catch((error) => {
+          if (
+            !error ||
+            typeof error !== "object" ||
+            !("code" in error) ||
+            (error as { code?: string }).code !== "ENOENT"
+          ) {
+            throw error;
+          }
+        });
+      };
+    } catch (error) {
+      if (
+        !error ||
+        typeof error !== "object" ||
+        !("code" in error) ||
+        (error as { code?: string }).code !== "EEXIST"
+      ) {
+        throw error;
+      }
+
+      if (await isClaimLockActive(config)) {
+        throw new ClaimInProgressError();
+      }
+
+      await unlink(path).catch(() => undefined);
+    }
+  }
+
+  throw new ClaimInProgressError();
 }
 
 async function withTimeout<T>(
@@ -675,54 +797,62 @@ async function runClaimNow(profileId?: string) {
   }
 
   activeClaim = (async () => {
-    await loadClaimState(config);
+    const releaseLock = await acquireClaimLock(config);
 
-    const targetProfiles = selectedProfile ? [selectedProfile] : config.profiles;
-    const startedAt = new Date().toISOString();
-    claimState = normalizeClaimState(
-      {
+    try {
+      await loadClaimState(config);
+
+      const targetProfiles = selectedProfile
+        ? [selectedProfile]
+        : config.profiles;
+      const startedAt = new Date().toISOString();
+      claimState = normalizeClaimState(
+        {
+          ...claimState,
+          claiming: true,
+          lastRunStartedAt: startedAt,
+        },
+        config,
+      );
+
+      for (const profile of targetProfiles) {
+        claimState.profiles[profile.id] = {
+          ...claimState.profiles[profile.id],
+          id: profile.id,
+          label: profile.label,
+          claiming: true,
+          lastRunStartedAt: startedAt,
+        };
+      }
+
+      await saveClaimState(claimState, config);
+
+      for (const profile of targetProfiles) {
+        const result = await claimBrawlStarsReward(profile, config);
+        claimState.profiles[profile.id] = {
+          ...claimState.profiles[profile.id],
+          id: profile.id,
+          label: profile.label,
+          claiming: false,
+          lastRunStartedAt: startedAt,
+          lastRunFinishedAt: new Date().toISOString(),
+          result,
+        };
+        await saveClaimState(claimState, config);
+      }
+
+      claimState = {
         ...claimState,
-        claiming: true,
-        lastRunStartedAt: startedAt,
-      },
-      config,
-    );
-
-    for (const profile of targetProfiles) {
-      claimState.profiles[profile.id] = {
-        ...claimState.profiles[profile.id],
-        id: profile.id,
-        label: profile.label,
-        claiming: true,
-        lastRunStartedAt: startedAt,
-      };
-    }
-
-    await saveClaimState(claimState, config);
-
-    for (const profile of targetProfiles) {
-      const result = await claimBrawlStarsReward(profile, config);
-      claimState.profiles[profile.id] = {
-        ...claimState.profiles[profile.id],
-        id: profile.id,
-        label: profile.label,
         claiming: false,
         lastRunStartedAt: startedAt,
         lastRunFinishedAt: new Date().toISOString(),
-        result,
       };
       await saveClaimState(claimState, config);
+
+      return claimState;
+    } finally {
+      await releaseLock();
     }
-
-    claimState = {
-      ...claimState,
-      claiming: false,
-      lastRunStartedAt: startedAt,
-      lastRunFinishedAt: new Date().toISOString(),
-    };
-    await saveClaimState(claimState, config);
-
-    return claimState;
   })().finally(() => {
     activeClaim = null;
   });
@@ -734,13 +864,20 @@ async function getClaimState() {
   const config = getConfig();
 
   await loadClaimState(config);
+  const claiming = Boolean(activeClaim) || (await isClaimLockActive(config));
 
   return {
     ...claimState,
-    claiming:
-      Boolean(activeClaim) ||
-      claimState.claiming ||
-      Object.values(claimState.profiles).some((profile) => profile.claiming),
+    claiming,
+    profiles: Object.fromEntries(
+      Object.entries(claimState.profiles).map(([id, profile]) => [
+        id,
+        {
+          ...profile,
+          claiming: claiming && profile.claiming,
+        },
+      ]),
+    ),
   };
 }
 
@@ -1126,7 +1263,17 @@ async function handleRequest(request: Request) {
       }
     }
 
-    const nextState = await runClaimNow(url.searchParams.get("profile") || "");
+    let nextState: ClaimState;
+
+    try {
+      nextState = await runClaimNow(url.searchParams.get("profile") || "");
+    } catch (error) {
+      if (error instanceof ClaimInProgressError) {
+        return jsonResponse({ ok: false, error: error.message }, 409);
+      }
+
+      throw error;
+    }
     const accept = request.headers.get("accept") || "";
 
     if (accept.includes("text/html")) {
