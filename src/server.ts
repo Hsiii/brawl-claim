@@ -4,10 +4,10 @@ import { dirname, join } from "node:path";
 import type { Page } from "playwright";
 import { chromium } from "playwright";
 
-const APP_NAME = "Brawl Stars Store Claimer";
+const APP_NAME = "BrawlClaim";
 const STORE_URL = "https://store.supercell.com/brawlstars";
 const DEFAULT_PORT = 3100;
-const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
+const DEFAULT_DATA_DIR = ".data/brawl-claim";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
@@ -18,7 +18,7 @@ const INSPECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
-const STATE_FILE = "claimer.json";
+const STATE_FILE = "claim.json";
 const DEFAULT_PROFILE_ID = "me";
 const CLAIM_FLAGS = new Set(["--claim-once"]);
 const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
@@ -199,7 +199,10 @@ function getConfig(): AppConfig {
   cachedConfig = {
     accessPassword: readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD"),
     accessUsername: readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME"),
-    claimEnabled: parseBoolean(readEnv("BRAWL_CLAIM_ENABLED"), false),
+    claimEnabled: parseBoolean(
+      readEnv("BRAWL_CLAIM_ENABLED"),
+      false,
+    ),
     claimTimeoutMs:
       Number(readEnv("BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS")) ||
       DEFAULT_CLAIM_TIMEOUT_MS,
@@ -649,7 +652,7 @@ async function runClaimNow(profileId?: string) {
   const selectedProfile = findProfile(config, profileId);
 
   if (profileId && !selectedProfile) {
-    throw new Error(`Unknown Brawl Stars claimer profile: ${profileId}`);
+    throw new Error(`Unknown BrawlClaim profile: ${profileId}`);
   }
 
   if (activeClaim) {
@@ -1097,17 +1100,17 @@ async function startScheduler() {
   }
 
   void runClaimNow().catch((error) => {
-    console.error("Brawl Stars claim failed:", error);
+    console.error("BrawlClaim failed:", error);
   });
 
   setInterval(() => {
     void runClaimNow().catch((error) => {
-      console.error("Brawl Stars claim failed:", error);
+      console.error("BrawlClaim failed:", error);
     });
   }, config.intervalMs);
 
   console.log(
-    `Brawl Stars claimer enabled for ${config.profiles.length} profiles every ${Math.round(
+    `BrawlClaim enabled for ${config.profiles.length} profiles every ${Math.round(
       config.intervalMs / 60_000,
     )} minutes.`,
   );

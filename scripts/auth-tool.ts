@@ -14,7 +14,7 @@ const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const DEFAULT_CDP_PORT = 9322;
-const REMOTE_TMP_AUTH_FILE_PREFIX = "/tmp/brawl-stars-claimer-auth";
+const REMOTE_TMP_AUTH_FILE_PREFIX = "/tmp/brawl-claim-auth";
 const REMOTE_DEFAULT_AUTH_FILE = "/app/state/auth.json";
 const REMOTE_PROFILE_AUTH_ROOT = "/app/state/profiles";
 const REMOTE_OPERATIONS_DIR = "/srv/platform/operations";
@@ -757,7 +757,7 @@ function renderPage() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Brawl Stars Store Claimer - Auth Setup</title>
+  <title>BrawlClaim - Auth Setup</title>
   <style>
     :root {
       --color-bg: #111315;
@@ -859,10 +859,10 @@ function renderPage() {
   <main>
     <header>
       <div>
-        <h1>Auth Setup</h1>
+        <h1>BrawlClaim Auth Setup</h1>
         <p>Save your Supercell Store login for scheduled claims.</p>
       </div>
-      <a href="${DASHBOARD_URL}">Claimer</a>
+      <a href="${DASHBOARD_URL}">Dashboard</a>
     </header>
 
     <section class="panel">
@@ -1066,7 +1066,7 @@ const server = Bun.serve({
 
 const toolUrl = `http://${server.hostname}:${server.port}/?token=${token}`;
 
-console.log(`Brawl Stars auth setup listening at ${toolUrl}`);
+console.log(`BrawlClaim auth setup listening at ${toolUrl}`);
 console.log("This server is bound to localhost and uses a one-time URL token.");
 
 process.on("SIGINT", async () => {

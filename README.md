@@ -1,8 +1,8 @@
-# Brawl Stars Store Claimer
+# BrawlClaim
 
-A focused Bun and Playwright service that opens the official Supercell Store,
-checks the Brawl Stars page, and clicks a visible `Claim` or `Collect` reward
-for a saved Supercell ID.
+BrawlClaim is a focused Bun and Playwright service that opens the official
+Supercell Store, checks the Brawl Stars page, and clicks a visible `Claim` or
+`Collect` reward for a saved Supercell ID.
 
 The production bot runs every day at **5:00 PM GMT+8**. It only uses a login
 session you create yourself and does not bypass captchas, email codes,
@@ -41,7 +41,7 @@ mode `0600`, and never asks for account credentials itself.
 
 ## Run A Check
 
-Run the claimer locally for the default `me` profile:
+Run BrawlClaim locally for the default `me` profile:
 
 ```bash
 bun run claim -- --profile me
@@ -104,9 +104,10 @@ The service reads these environment variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `BRAWL_CLAIM_ENABLED` | `false` | Enable the service's internal recurring claim loop |
+| `BRAWL_STARS_CLAIMER_INTERVAL_MINUTES` | `1440` | Internal recurring claim interval |
 | `BRAWL_STARS_CLAIMER_PROFILES` | `me` | Comma-separated profile IDs or `id:Label` entries |
 | `BRAWL_STARS_CLAIMER_AUTH_STATE_FILE` | profile data directory | Playwright storage-state file for the first profile |
-| `BRAWL_STARS_CLAIMER_DATA_DIR` | `.data/brawl-stars-claimer` | Claim state and optional screenshots |
+| `BRAWL_STARS_CLAIMER_DATA_DIR` | `.data/brawl-claim` | Claim state and optional screenshots |
 | `BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH` | empty | URL prefix such as `/brawlstars` |
 | `BRAWL_STARS_CLAIMER_ACCESS_USERNAME` | empty | Optional dashboard Basic Auth username |
 | `BRAWL_STARS_CLAIMER_ACCESS_PASSWORD` | empty | Optional dashboard Basic Auth password |

@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "brawl-stars-store-claimer",
+      "name": "brawl-claim",
       "dependencies": {
         "playwright": "^1.61.1",
       },

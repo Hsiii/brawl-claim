@@ -1,7 +1,7 @@
 {
-  "name": "brawl-stars-store-claimer",
+  "name": "brawl-claim",
   "version": "0.1.0",
-  "description": "Claim available Brawl Stars rewards from the official Supercell Store.",
+  "description": "BrawlClaim checks the official Supercell Store for available Brawl Stars rewards.",
   "private": true,
   "type": "module",
   "scripts": {
