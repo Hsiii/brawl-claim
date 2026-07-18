@@ -1,7 +1,7 @@
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { Locator, Page } from "playwright";
+import type { Page } from "playwright";
 import { chromium } from "playwright";
 
 const APP_NAME = "Brawl Stars Store Claimer";
@@ -10,9 +10,8 @@ const DEFAULT_PORT = 3100;
 const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
-const SELECTOR_PROBE_TIMEOUT_MS = 2_000;
 const NAVIGATION_TIMEOUT_MS = 45_000;
-const STORE_RELOAD_GRACE_MS = 5_000;
+const STORE_RELOAD_GRACE_MS = 15_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
@@ -420,57 +419,23 @@ async function gotoStore(page: Page) {
     timeout: NAVIGATION_TIMEOUT_MS,
   });
   await page.waitForTimeout(STORE_RELOAD_GRACE_MS);
-  await page.waitForLoadState("domcontentloaded", {
+  await page.waitForLoadState("load", {
     timeout: NAVIGATION_TIMEOUT_MS,
   });
   await page.waitForTimeout(2_000);
-}
-
-async function firstVisibleLocator(page: Page, selectors: string[]) {
-  for (const selector of selectors) {
-    const locator = page.locator(selector).first();
-
-    try {
-      if (
-        await withTimeout(
-          locator.isVisible(),
-          SELECTOR_PROBE_TIMEOUT_MS,
-          `Selector probe ${selector}`,
-        )
-      ) {
-        return locator;
-      }
-    } catch {
-      // Try the next selector.
-    }
-  }
-
-  return null;
 }
 
 async function screenshotTarget({
   config,
   filename,
   page,
-  selectors,
 }: {
   config: AppConfig;
   filename: string;
   page: Page;
-  selectors: string[];
 }) {
   await mkdir(config.dataDir, { recursive: true });
   const path = assetPath(config, filename);
-  const target = await firstVisibleLocator(page, selectors);
-
-  if (target) {
-    try {
-      await target.screenshot({ path, timeout: SCREENSHOT_TIMEOUT_MS });
-      return assetUrl(config, filename);
-    } catch {
-      // Fall back to viewport screenshot.
-    }
-  }
 
   try {
     await page.screenshot({
@@ -485,47 +450,65 @@ async function screenshotTarget({
   }
 }
 
-async function extractOffers(page: Page): Promise<ClaimOffer[]> {
-  const rawOffers = await page.locator("a[href*='/product/']").evaluateAll(
-    (anchors) =>
-      anchors.map((anchor) => {
-        const element = anchor as HTMLAnchorElement;
+function rewardLabels(selectors: string[]) {
+  const labels = selectors.flatMap((selector) => {
+    const hasText = selector.match(/:has-text\(["'](.+?)["']\)/i)?.[1];
+    const text = selector.match(/^text=["']?(.+?)["']?$/i)?.[1];
 
-        return {
-          title:
-            element.innerText?.trim() ||
-            element.getAttribute("aria-label")?.trim() ||
-            element.getAttribute("title")?.trim() ||
-            "",
-          url: element.href,
-        };
-      }),
-  );
-  const seenUrls = new Set<string>();
-  const offers: ClaimOffer[] = [];
+    return hasText || text ? [hasText || text || ""] : [];
+  });
 
-  for (const offer of rawOffers) {
-    if (!offer.title || !offer.url || seenUrls.has(offer.url)) {
-      continue;
-    }
-
-    seenUrls.add(offer.url);
-    offers.push({
-      title: compactText(offer.title),
-      url: offer.url,
-    });
-
-    if (offers.length >= 4) {
-      break;
-    }
-  }
-
-  return offers;
+  return labels.length > 0 ? labels : ["Claim", "Collect"];
 }
 
-async function clickRewardButton(rewardButton: Locator) {
-  await rewardButton.click({ timeout: ACTION_TIMEOUT_MS });
-  await rewardButton.page().waitForTimeout(2_000);
+async function inspectStore(page: Page, selectors: string[]) {
+  return page.evaluate((labels) => {
+    const normalize = (value: string | null | undefined) =>
+      (value || "").replace(/\s+/g, " ").trim();
+    const controls = Array.from(
+      document.querySelectorAll<HTMLElement>("button,[role='button']"),
+    ).filter((element) => {
+      const style = getComputedStyle(element);
+
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        element.getClientRects().length > 0
+      );
+    });
+    const bodyText = normalize(document.body?.innerText).toLowerCase();
+    const loggedOut =
+      bodyText.includes("log in to view offers") ||
+      controls.some(
+        (element) => normalize(element.innerText).toLowerCase() === "log in",
+      );
+    const normalizedLabels = labels.map((label) => label.toLowerCase());
+    const reward = loggedOut
+      ? undefined
+      : controls.find((element) => {
+          const text = normalize(element.innerText).toLowerCase();
+
+          return normalizedLabels.some((label) => text.includes(label));
+        });
+    const offers = Array.from(
+      document.querySelectorAll<HTMLAnchorElement>("a[href*='/product/']"),
+    ).map((anchor) => ({
+      title: normalize(
+        anchor.innerText ||
+          anchor.getAttribute("aria-label") ||
+          anchor.getAttribute("title"),
+      ),
+      url: anchor.href,
+    }));
+
+    reward?.click();
+
+    return {
+      loggedIn: !loggedOut,
+      rewardClicked: Boolean(reward),
+      offers,
+    };
+  }, rewardLabels(selectors));
 }
 
 async function claimWithPage({
@@ -540,17 +523,8 @@ async function claimWithPage({
   profile: ClaimProfile;
 }): Promise<ClaimResult> {
   await gotoStore(page);
-
-  const loginPrompt = await firstVisibleLocator(page, [
-    'text="Log in to view offers"',
-    'text="LOG IN TO VIEW OFFERS"',
-    'button:has-text("Log in")',
-    'button:has-text("LOG IN")',
-  ]);
-  const loggedIn = loginPrompt === null;
-  const rewardButton = loggedIn
-    ? await firstVisibleLocator(page, config.rewardSelectors)
-    : null;
+  const inspection = await inspectStore(page, config.rewardSelectors);
+  const loggedIn = inspection.loggedIn;
   let claimed = false;
   let status: ClaimStatus = loggedIn ? "no_reward" : "login_required";
   let message = loggedIn
@@ -561,19 +535,32 @@ async function claimWithPage({
     message = `No saved auth state for ${profile.label}. Run auth setup for this profile.`;
   }
 
-  if (rewardButton) {
-    await clickRewardButton(rewardButton);
+  if (inspection.rewardClicked) {
+    await page.waitForTimeout(2_000);
     claimed = true;
     status = "claimed";
     message = `Reward button found and clicked for ${profile.label}.`;
   }
 
-  const offers = await extractOffers(page);
+  const seenOfferUrls = new Set<string>();
+  const offers = inspection.offers
+    .filter((offer) => {
+      if (!offer.title || !offer.url || seenOfferUrls.has(offer.url)) {
+        return false;
+      }
+
+      seenOfferUrls.add(offer.url);
+      return true;
+    })
+    .slice(0, 4)
+    .map((offer) => ({
+      title: compactText(offer.title),
+      url: offer.url,
+    }));
   const imageUrl = await screenshotTarget({
     config,
     filename: profile.screenshotFilename,
     page,
-    selectors: ["main", "body"],
   });
 
   return {
