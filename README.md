@@ -49,7 +49,8 @@ bun run claim -- --profile me
 
 Possible results:
 
-- `claimed`: a visible reward button was clicked.
+- `claimed`: the Store confirmed the reward after BrawlClaim clicked it.
+- `claim_unconfirmed`: a reward control was clicked, but no success evidence appeared.
 - `no_reward`: login is valid, but no reward button is currently available.
 - `login_required`: the saved Supercell session must be refreshed.
 - `error`: the store or browser did not complete the check.

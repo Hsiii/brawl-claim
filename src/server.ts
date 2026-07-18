@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { Page } from "playwright";
+import type { Browser, BrowserContext, Frame, Locator, Page } from "playwright";
 import { chromium } from "playwright";
 
 const APP_NAME = "BrawlClaim";
@@ -20,10 +20,12 @@ const DEFAULT_DATA_DIR = ".data/brawl-claim";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
-const STORE_SETTLE_MS = 75_000;
+const STORE_READY_TIMEOUT_MS = 75_000;
+const STORE_STABILITY_MS = 2_000;
+const STORE_NAVIGATION_ATTEMPTS = 3;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const CLEANUP_TIMEOUT_MS = 15_000;
-const INSPECTION_TIMEOUT_MS = 10_000;
+const CLAIM_VERIFICATION_TIMEOUT_MS = 20_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
@@ -34,7 +36,14 @@ const CLAIM_FLAGS = new Set(["--claim-once"]);
 const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
 const CSRF_TOKEN = crypto.randomUUID();
 
-type ClaimStatus = "claimed" | "no_reward" | "login_required" | "error";
+type ClaimStatus =
+  | "claimed"
+  | "claim_unconfirmed"
+  | "no_reward"
+  | "login_required"
+  | "error";
+
+type ClaimVerification = "confirmed" | "unconfirmed" | "not_attempted";
 
 type ClaimOffer = {
   title: string;
@@ -51,6 +60,7 @@ type ClaimProfile = {
 type ClaimResult = {
   status: ClaimStatus;
   claimed: boolean;
+  attempted: boolean;
   loggedIn: boolean;
   message: string;
   checkedAt: string;
@@ -59,6 +69,8 @@ type ClaimResult = {
   profileLabel: string;
   imageUrl?: string;
   offers: ClaimOffer[];
+  verification: ClaimVerification;
+  verificationEvidence: string[];
 };
 
 type ProfileClaimState = {
@@ -316,6 +328,7 @@ function normalizeResult(
   return {
     status: result.status,
     claimed: Boolean(result.claimed),
+    attempted: Boolean(result.attempted ?? result.claimed),
     loggedIn: Boolean(result.loggedIn),
     message: result.message || "",
     checkedAt: result.checkedAt,
@@ -324,6 +337,17 @@ function normalizeResult(
     profileLabel: profile.label,
     imageUrl: result.imageUrl,
     offers: Array.isArray(result.offers) ? result.offers : [],
+    verification:
+      result.verification === "confirmed" ||
+      result.verification === "unconfirmed" ||
+      result.verification === "not_attempted"
+        ? result.verification
+        : result.claimed
+          ? "confirmed"
+          : "not_attempted",
+    verificationEvidence: Array.isArray(result.verificationEvidence)
+      ? result.verificationEvidence
+      : [],
   } satisfies ClaimResult;
 }
 
@@ -524,11 +548,45 @@ async function withTimeout<T>(
 }
 
 async function gotoStore(page: Page) {
-  await page.goto(STORE_URL, {
-    waitUntil: "commit",
-    timeout: NAVIGATION_TIMEOUT_MS,
-  });
-  await new Promise((resolve) => setTimeout(resolve, STORE_SETTLE_MS));
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= STORE_NAVIGATION_ATTEMPTS; attempt += 1) {
+    try {
+      await page.goto(STORE_URL, {
+        waitUntil: "commit",
+        timeout: NAVIGATION_TIMEOUT_MS,
+      });
+      await page.waitForFunction(
+        () => {
+          const body = document.body;
+          const text = body?.innerText.replace(/\s+/g, " ").trim() || "";
+          const waitingRoom = /checking your browser|just a moment/i.test(text);
+
+          return Boolean(
+            body &&
+              text.length >= 40 &&
+              !waitingRoom &&
+              (document.readyState !== "loading" ||
+                body.querySelector("button,[role='button'],a[href*='/product/']")),
+          );
+        },
+        undefined,
+        { timeout: STORE_READY_TIMEOUT_MS },
+      );
+      await page.waitForTimeout(STORE_STABILITY_MS);
+      return;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < STORE_NAVIGATION_ATTEMPTS) {
+        await page.waitForTimeout(1_000 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Supercell Store did not become ready.");
 }
 
 async function screenshotTarget({
@@ -556,80 +614,188 @@ async function screenshotTarget({
   }
 }
 
-function rewardLabels(selectors: string[]) {
-  const labels = selectors.flatMap((selector) => {
-    const hasText = selector.match(/:has-text\(["'](.+?)["']\)/i)?.[1];
-    const text = selector.match(/^text=["']?(.+?)["']?$/i)?.[1];
-
-    return hasText || text ? [hasText || text || ""] : [];
-  });
-
-  return labels.length > 0 ? labels : ["Claim", "Collect"];
+function normalizeStoreText(value: string) {
+  return value.replace(/\s+/g, " ").trim();
 }
 
-async function inspectStore(page: Page, selectors: string[]) {
-  const labels = rewardLabels(selectors);
-  const expression = `(() => {
-    const labels = ${JSON.stringify(labels)}.map((label) => label.toLowerCase());
-    const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
-    const controls = Array.from(document.querySelectorAll("button,[role='button']"))
-      .filter((element) => {
-        const style = getComputedStyle(element);
-        return style.display !== "none" &&
-          style.visibility !== "hidden" &&
-          element.getClientRects().length > 0;
-      });
-    const bodyText = normalize(document.body?.innerText).toLowerCase();
-    const loggedOut = bodyText.includes("log in to view offers") ||
-      controls.some((element) => normalize(element.innerText).toLowerCase() === "log in");
-    const reward = loggedOut ? undefined : controls.find((element) => {
-      const text = normalize(element.innerText).toLowerCase();
-      return labels.some((label) => text.includes(label));
-    });
-    const offers = Array.from(document.querySelectorAll("a[href*='/product/']"))
-      .map((anchor) => ({
-        title: normalize(anchor.innerText || anchor.getAttribute("aria-label") || anchor.title),
-        url: anchor.href,
-      }));
-    reward?.click();
-    return { loggedIn: !loggedOut, rewardClicked: Boolean(reward), offers };
-  })()`;
-  let lastError: unknown;
+async function frameBodyText(frame: Frame) {
+  return frame
+    .locator("body")
+    .innerText({ timeout: ACTION_TIMEOUT_MS })
+    .then(normalizeStoreText)
+    .catch(() => "");
+}
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const session = await page.context().newCDPSession(page);
+async function storeBodyText(page: Page) {
+  return normalizeStoreText(
+    (await Promise.all(page.frames().map(frameBodyText))).filter(Boolean).join(" "),
+  );
+}
 
-    try {
-      const response = await withTimeout(
-        session.send("Runtime.evaluate", {
-          expression,
-          returnByValue: true,
-        }),
-        INSPECTION_TIMEOUT_MS,
-        "Store inspection",
-      );
-      const value = response.result.value as
-        | {
-            loggedIn: boolean;
-            rewardClicked: boolean;
-            offers: Array<{ title: string; url: string }>;
+async function collectOffers(page: Page) {
+  const offers = await Promise.all(
+    page.frames().map((frame) =>
+      frame
+        .locator("a[href*='/product/']")
+        .evaluateAll((anchors) =>
+          anchors.map((element) => {
+            const anchor = element as HTMLAnchorElement;
+
+            return {
+              title: (
+                anchor.innerText ||
+                anchor.getAttribute("aria-label") ||
+                anchor.title
+              )
+                .replace(/\s+/g, " ")
+                .trim(),
+              url: anchor.href,
+            };
+          }),
+        )
+        .catch(() => []),
+    ),
+  );
+
+  return offers.flat();
+}
+
+async function findRewardControl(page: Page, selectors: string[]) {
+  const invalidSelectors: string[] = [];
+  let validSelectorCount = 0;
+
+  for (const selector of selectors) {
+    for (const frame of page.frames()) {
+      try {
+        const matches = frame.locator(selector);
+        const count = Math.min(await matches.count(), 20);
+        validSelectorCount += 1;
+
+        for (let index = 0; index < count; index += 1) {
+          const candidate = matches.nth(index);
+
+          if ((await candidate.isVisible()) && (await candidate.isEnabled())) {
+            return { locator: candidate, selector };
           }
-        | undefined;
-
-      if (value && typeof value.loggedIn === "boolean") {
-        return value;
+        }
+      } catch {
+        invalidSelectors.push(selector);
+        break;
       }
-
-      throw new Error("Store inspection returned no value.");
-    } catch (error) {
-      lastError = error;
-      await new Promise((resolve) => setTimeout(resolve, 2_000));
-    } finally {
-      void session.detach().catch(() => undefined);
     }
   }
 
-  throw lastError;
+  if (validSelectorCount === 0 && invalidSelectors.length > 0) {
+    throw new Error(
+      `Every reward selector is invalid: ${[...new Set(invalidSelectors)].join(", ")}`,
+    );
+  }
+
+  return undefined;
+}
+
+async function hasLoginPrompt(page: Page, bodyText: string) {
+  if (/log in to view offers/i.test(bodyText)) {
+    return true;
+  }
+
+  for (const frame of page.frames()) {
+    const controls = frame.locator("button,[role='button'],a");
+    const count = Math.min(await controls.count().catch(() => 0), 100);
+
+    for (let index = 0; index < count; index += 1) {
+      const control = controls.nth(index);
+
+      if (!(await control.isVisible().catch(() => false))) {
+        continue;
+      }
+
+      const label = normalizeStoreText(
+        await control.innerText({ timeout: ACTION_TIMEOUT_MS }).catch(() => ""),
+      );
+
+      if (/^(?:log|sign) in$/i.test(label)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+function confirmationTextEvidence(before: string, after: string) {
+  const patterns = [
+    /reward (?:has been )?(?:claimed|collected)/i,
+    /(?:claimed|collected) successfully/i,
+    /successfully (?:claimed|collected)/i,
+    /(?:reward|item) (?:was )?added to your (?:account|game)/i,
+  ];
+
+  return patterns
+    .filter((pattern) => pattern.test(after) && !pattern.test(before))
+    .map((pattern) => `Store confirmation matched ${pattern.source}`);
+}
+
+function claimMutationEvidence(
+  method: string,
+  responseUrl: string,
+  status: number,
+) {
+  if (
+    method === "GET" ||
+    status < 200 ||
+    status >= 300 ||
+    !/(?:claim|collect|redeem|reward|purchase|order)/i.test(responseUrl)
+  ) {
+    return undefined;
+  }
+
+  const url = new URL(responseUrl);
+
+  return `${method} ${url.origin}${url.pathname} returned ${status}`;
+}
+
+async function verifyClaimClick({
+  beforeText,
+  locator,
+  mutationEvidence,
+  page,
+}: {
+  beforeText: string;
+  locator: Locator;
+  mutationEvidence: string[];
+  page: Page;
+}) {
+  const deadline = Date.now() + CLAIM_VERIFICATION_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    const textEvidence = confirmationTextEvidence(
+      beforeText,
+      await storeBodyText(page),
+    );
+    const evidence = [...new Set([...textEvidence, ...mutationEvidence])];
+
+    if (evidence.length > 0) {
+      return { confirmed: true, evidence };
+    }
+
+    await page.waitForTimeout(500);
+  }
+
+  const controlChanged = await locator
+    .evaluate((element) => {
+      const control = element as HTMLButtonElement;
+
+      return !element.isConnected || control.disabled || element.getClientRects().length === 0;
+    })
+    .catch(() => true);
+
+  return {
+    confirmed: false,
+    evidence: controlChanged
+      ? ["Reward control changed after the click, but no confirmation was observed."]
+      : ["Reward control was clicked, but the Store did not confirm the claim."],
+  };
 }
 
 async function claimWithPage({
@@ -644,9 +810,24 @@ async function claimWithPage({
   profile: ClaimProfile;
 }): Promise<ClaimResult> {
   await gotoStore(page);
-  const inspection = await inspectStore(page, config.rewardSelectors);
-  const loggedIn = inspection.loggedIn;
+  const beforeText = await storeBodyText(page);
+  const loggedOut = await hasLoginPrompt(page, beforeText);
+  const storeError = beforeText.match(
+    /(?:something went wrong|access denied|checking your browser|service unavailable)/i,
+  )?.[0];
+
+  if (storeError) {
+    throw new Error(`Supercell Store returned an unusable page: ${storeError}`);
+  }
+
+  const rewardControl = loggedOut
+    ? undefined
+    : await findRewardControl(page, config.rewardSelectors);
+  const loggedIn = Boolean(rewardControl) || !loggedOut;
   let claimed = false;
+  let attempted = false;
+  let verification: ClaimVerification = "not_attempted";
+  let verificationEvidence: string[] = [];
   let status: ClaimStatus = loggedIn ? "no_reward" : "login_required";
   let message = loggedIn
     ? `No visible reward button found for ${profile.label}.`
@@ -656,15 +837,46 @@ async function claimWithPage({
     message = `No saved auth state for ${profile.label}. Run auth setup for this profile.`;
   }
 
-  if (inspection.rewardClicked) {
-    await page.waitForTimeout(2_000);
-    claimed = true;
-    status = "claimed";
-    message = `Reward button found and clicked for ${profile.label}.`;
+  if (rewardControl) {
+    attempted = true;
+    const mutationEvidence: string[] = [];
+    const onResponse = (response: import("playwright").Response) => {
+      const evidence = claimMutationEvidence(
+        response.request().method(),
+        response.url(),
+        response.status(),
+      );
+
+      if (evidence) {
+        mutationEvidence.push(evidence);
+      }
+    };
+
+    page.on("response", onResponse);
+
+    try {
+      await rewardControl.locator.click({ timeout: ACTION_TIMEOUT_MS });
+      const result = await verifyClaimClick({
+        beforeText,
+        locator: rewardControl.locator,
+        mutationEvidence,
+        page,
+      });
+
+      claimed = result.confirmed;
+      verification = result.confirmed ? "confirmed" : "unconfirmed";
+      verificationEvidence = result.evidence;
+      status = result.confirmed ? "claimed" : "claim_unconfirmed";
+      message = result.confirmed
+        ? `Reward claim was verified for ${profile.label}.`
+        : `Reward control was clicked for ${profile.label}, but the Store did not confirm success.`;
+    } finally {
+      page.off("response", onResponse);
+    }
   }
 
   const seenOfferUrls = new Set<string>();
-  const offers = inspection.offers
+  const offers = (await collectOffers(page))
     .filter((offer) => {
       if (!offer.title || !offer.url || seenOfferUrls.has(offer.url)) {
         return false;
@@ -678,17 +890,16 @@ async function claimWithPage({
       title: compactText(offer.title),
       url: offer.url,
     }));
-  const imageUrl = IS_CLAIM_ONCE
-    ? undefined
-    : await screenshotTarget({
-        config,
-        filename: profile.screenshotFilename,
-        page,
-      });
+  const imageUrl = await screenshotTarget({
+    config,
+    filename: profile.screenshotFilename,
+    page,
+  });
 
   return {
     status,
     claimed,
+    attempted,
     loggedIn,
     message,
     checkedAt: new Date().toISOString(),
@@ -697,6 +908,8 @@ async function claimWithPage({
     profileLabel: profile.label,
     imageUrl,
     offers,
+    verification,
+    verificationEvidence,
   };
 }
 
@@ -704,6 +917,7 @@ function errorResult(error: unknown, profile: ClaimProfile): ClaimResult {
   return {
     status: "error",
     claimed: false,
+    attempted: false,
     loggedIn: false,
     message: error instanceof Error ? error.message : "Unknown error",
     checkedAt: new Date().toISOString(),
@@ -711,6 +925,8 @@ function errorResult(error: unknown, profile: ClaimProfile): ClaimResult {
     profileId: profile.id,
     profileLabel: profile.label,
     offers: [],
+    verification: "not_attempted",
+    verificationEvidence: [],
   };
 }
 
@@ -718,13 +934,15 @@ async function claimBrawlStarsReward(
   profile: ClaimProfile,
   config = getConfig(),
 ) {
-  return withTimeout(
-    (async () => {
-      const browser = await chromium.launch({
-        headless: !process.env.DISPLAY,
-      });
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
 
-      try {
+  try {
+    return await withTimeout(
+      (async () => {
+        browser = await chromium.launch({
+          headless: !process.env.DISPLAY,
+        });
         const hasAuthState = await fileExists(profile.authStateFile);
         const contextOptions: Parameters<typeof browser.newContext>[0] = {
           viewport: {
@@ -737,41 +955,41 @@ async function claimBrawlStarsReward(
           contextOptions.storageState = profile.authStateFile;
         }
 
-        const context = await browser.newContext(contextOptions);
+        context = await browser.newContext(contextOptions);
         const page = await context.newPage();
 
         page.setDefaultTimeout(ACTION_TIMEOUT_MS);
         page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT_MS);
 
-        try {
-          return await claimWithPage({
-            config,
-            hasAuthState,
-            page,
-            profile,
-          });
-        } finally {
-          if (!IS_CLAIM_ONCE) {
-            await withTimeout(
-              context.close(),
-              CLEANUP_TIMEOUT_MS,
-              "Browser context cleanup",
-            ).catch(() => undefined);
-          }
-        }
-      } finally {
-        if (!IS_CLAIM_ONCE) {
-          await withTimeout(
-            browser.close(),
-            CLEANUP_TIMEOUT_MS,
-            "Browser cleanup",
-          ).catch(() => undefined);
-        }
-      }
-    })(),
-    config.claimTimeoutMs,
-    `${APP_NAME} ${profile.label}`,
-  ).catch((error) => errorResult(error, profile));
+        return claimWithPage({
+          config,
+          hasAuthState,
+          page,
+          profile,
+        });
+      })(),
+      config.claimTimeoutMs,
+      `${APP_NAME} ${profile.label}`,
+    );
+  } catch (error) {
+    return errorResult(error, profile);
+  } finally {
+    if (context) {
+      await withTimeout(
+        context.close(),
+        CLEANUP_TIMEOUT_MS,
+        "Browser context cleanup",
+      ).catch(() => undefined);
+    }
+
+    if (browser) {
+      await withTimeout(
+        browser.close(),
+        CLEANUP_TIMEOUT_MS,
+        "Browser cleanup",
+      ).catch(() => undefined);
+    }
+  }
 }
 
 function findProfile(config: AppConfig, profileId: string | undefined | null) {
@@ -999,6 +1217,17 @@ function renderCheckedAt(result: ClaimResult | undefined) {
     : "Never";
 }
 
+function renderVerification(result: ClaimResult | undefined) {
+  if (!result?.attempted) {
+    return "Not attempted";
+  }
+
+  const evidence = result.verificationEvidence[0];
+  const label = result.verification === "confirmed" ? "Confirmed" : "Unconfirmed";
+
+  return evidence ? `${label}: ${evidence}` : label;
+}
+
 function renderProfileCard(profileState: ProfileClaimState, config: AppConfig) {
   const result = profileState.result;
   const image = result?.imageUrl
@@ -1021,6 +1250,7 @@ function renderProfileCard(profileState: ProfileClaimState, config: AppConfig) {
       <div class="details">
         ${renderStatusBadge(result)}
         <p class="message">${escapeHtml(result?.message || "No claim has run yet.")}</p>
+        <p class="meta">Verification: ${escapeHtml(renderVerification(result))}</p>
         <div>
           <h3>Captured Offers</h3>
           ${renderOffers(result?.offers || [])}
@@ -1161,7 +1391,8 @@ function renderPage(state: ClaimState, config: AppConfig) {
     }
     .badge[data-status="claimed"] { color: var(--color-success); }
     .badge[data-status="login_required"],
-    .badge[data-status="no_reward"] { color: var(--color-warning); }
+    .badge[data-status="no_reward"],
+    .badge[data-status="claim_unconfirmed"] { color: var(--color-warning); }
     .badge[data-status="error"] { color: var(--color-error); }
     .offers {
       margin: 0;
@@ -1389,6 +1620,8 @@ if (IS_CLAIM_ONCE) {
     ? 1
     : results.some((result) => result?.status === "login_required")
       ? 2
+      : results.some((result) => result?.status === "claim_unconfirmed")
+        ? 3
       : 0;
 
   console.log(JSON.stringify(output, null, 2));
