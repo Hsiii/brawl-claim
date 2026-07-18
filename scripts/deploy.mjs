@@ -1,9 +1,9 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
 const service = "brawlstars";
-const remoteHost = process.env.ORACLE_HOST ?? "oracle";
+const remoteHost = process.env.PLATFORM_HOST ?? "platform";
 const remoteDeployRoot =
-  process.env.ORACLE_DEPLOY_ROOT ?? "/home/ubuntu/bots/oracle";
+  process.env.PLATFORM_INFRA_ROOT ?? "/srv/platform/infra";
 
 function output(command, args) {
   return execFileSync(command, args, { encoding: "utf8" }).trim();
@@ -15,10 +15,6 @@ function run(command, args) {
   if (result.status !== 0) {
     process.exit(result.status ?? 1);
   }
-}
-
-function hasRemote(name) {
-  return output("git", ["remote"]).split("\n").includes(name);
 }
 
 const branch = output("git", ["branch", "--show-current"]);
@@ -33,15 +29,10 @@ if (output("git", ["status", "--porcelain"])) {
   process.exit(1);
 }
 
-if (!hasRemote("origin")) {
+if (!output("git", ["remote"]).split("\n").includes("origin")) {
   console.error("Missing origin remote.");
   process.exit(1);
 }
 
 run("git", ["push", "origin", branch]);
-
-if (hasRemote("oracle")) {
-  run("git", ["push", "oracle", branch]);
-}
-
 run("ssh", [remoteHost, `${remoteDeployRoot}/scripts/deploy-${service}`]);

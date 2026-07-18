@@ -59,15 +59,15 @@ The production dashboard is available at
 
 ## Daily Schedule
 
-Oracle owns the production service and its systemd timer. The timer runs at
+The shared platform host owns the production service and its systemd timer. The timer runs at
 `09:00:00 UTC`, which is `17:00:00 GMT+8`, and persists across reboots.
 
 Useful operator commands:
 
 ```bash
-ssh oracle /home/ubuntu/bots/oracle/scripts/claim-brawlstars-reward --profile me
-ssh oracle systemctl status oracle-brawlstars-claim.timer
-ssh oracle journalctl -u oracle-brawlstars-claim.service
+ssh platform /srv/platform/infra/scripts/claim-brawlstars-reward --profile me
+ssh platform systemctl status platform-brawlstars-claim.timer
+ssh platform journalctl -u platform-brawlstars-claim.service
 ```
 
 Deploy committed changes from `main` with:

@@ -9,7 +9,7 @@ const DEFAULT_AUTH_DIR = ".data/auth";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
 const DEFAULT_PROFILE_ROOT = ".data/auth-browser-profiles";
 const DEFAULT_PROFILES = "me";
-const DEFAULT_REMOTE_HOST = "oracle";
+const DEFAULT_REMOTE_HOST = "platform";
 const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -17,8 +17,8 @@ const DEFAULT_CDP_PORT = 9322;
 const REMOTE_TMP_AUTH_FILE_PREFIX = "/tmp/brawl-stars-claimer-auth";
 const REMOTE_DEFAULT_AUTH_FILE = "/app/state/auth.json";
 const REMOTE_PROFILE_AUTH_ROOT = "/app/state/profiles";
-const REMOTE_ORACLE_DIR = "/home/ubuntu/bots/oracle";
-const REMOTE_ENV_FILE = "/home/ubuntu/bots/secrets/brawl-stars-claimer.env";
+const REMOTE_INFRA_DIR = "/srv/platform/infra";
+const REMOTE_ENV_FILE = "/srv/platform/secrets/brawl-stars-claimer.env";
 const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
 const STORE_URL = "https://store.supercell.com/brawlstars";
 
@@ -690,10 +690,10 @@ set_env() {
     needs_deploy=1
   fi
 }
-container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
+container_id="$(sudo docker compose -f ${REMOTE_INFRA_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 if [ -z "$container_id" ]; then
-  ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
-  container_id="$(sudo docker compose -f ${REMOTE_ORACLE_DIR}/compose.yaml ps -q brawl-stars-claimer)"
+  ${REMOTE_INFRA_DIR}/scripts/deploy-brawlstars
+  container_id="$(sudo docker compose -f ${REMOTE_INFRA_DIR}/compose.yaml ps -q brawl-stars-claimer)"
 fi
 sudo docker exec -u root "$container_id" mkdir -p "$(dirname "$remote_auth_file")"
 sudo docker cp ${profile.remoteTmpAuthFile} "$container_id:$remote_auth_file"
@@ -702,7 +702,7 @@ sudo docker exec -u root "$container_id" chmod 600 "$remote_auth_file"
 set_env BRAWL_STARS_CLAIMER_PROFILES "$desired_profiles"
 set_env BRAWL_STARS_CLAIMER_AUTH_STATE_FILE "$desired_auth_file"
 if [ "$needs_deploy" = "1" ]; then
-  ${REMOTE_ORACLE_DIR}/scripts/deploy-brawlstars
+  ${REMOTE_INFRA_DIR}/scripts/deploy-brawlstars
 fi
 rm -f ${profile.remoteTmpAuthFile}
 `;
