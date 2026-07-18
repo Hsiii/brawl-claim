@@ -11,7 +11,7 @@ const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
-const STORE_RELOAD_GRACE_MS = 15_000;
+const STORE_SETTLE_MS = 75_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
@@ -418,14 +418,7 @@ async function gotoStore(page: Page) {
     waitUntil: "commit",
     timeout: NAVIGATION_TIMEOUT_MS,
   });
-  await page.waitForLoadState("domcontentloaded", {
-    timeout: NAVIGATION_TIMEOUT_MS,
-  });
-  await page.waitForTimeout(STORE_RELOAD_GRACE_MS);
-  await page.waitForLoadState("load", {
-    timeout: NAVIGATION_TIMEOUT_MS,
-  });
-  await page.waitForTimeout(2_000);
+  await new Promise((resolve) => setTimeout(resolve, STORE_SETTLE_MS));
 }
 
 async function screenshotTarget({
@@ -465,53 +458,68 @@ function rewardLabels(selectors: string[]) {
 }
 
 async function inspectStore(page: Page, selectors: string[]) {
-  return page.evaluate((labels) => {
-    const normalize = (value: string | null | undefined) =>
-      (value || "").replace(/\s+/g, " ").trim();
-    const controls = Array.from(
-      document.querySelectorAll<HTMLElement>("button,[role='button']"),
-    ).filter((element) => {
-      const style = getComputedStyle(element);
+  const labels = rewardLabels(selectors);
+  let lastError: unknown;
 
-      return (
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        element.getClientRects().length > 0
-      );
-    });
-    const bodyText = normalize(document.body?.innerText).toLowerCase();
-    const loggedOut =
-      bodyText.includes("log in to view offers") ||
-      controls.some(
-        (element) => normalize(element.innerText).toLowerCase() === "log in",
-      );
-    const normalizedLabels = labels.map((label) => label.toLowerCase());
-    const reward = loggedOut
-      ? undefined
-      : controls.find((element) => {
-          const text = normalize(element.innerText).toLowerCase();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await page.evaluate((rewardLabels) => {
+        const normalize = (value: string | null | undefined) =>
+          (value || "").replace(/\s+/g, " ").trim();
+        const controls = Array.from(
+          document.querySelectorAll<HTMLElement>("button,[role='button']"),
+        ).filter((element) => {
+          const style = getComputedStyle(element);
 
-          return normalizedLabels.some((label) => text.includes(label));
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            element.getClientRects().length > 0
+          );
         });
-    const offers = Array.from(
-      document.querySelectorAll<HTMLAnchorElement>("a[href*='/product/']"),
-    ).map((anchor) => ({
-      title: normalize(
-        anchor.innerText ||
-          anchor.getAttribute("aria-label") ||
-          anchor.getAttribute("title"),
-      ),
-      url: anchor.href,
-    }));
+        const bodyText = normalize(document.body?.innerText).toLowerCase();
+        const loggedOut =
+          bodyText.includes("log in to view offers") ||
+          controls.some(
+            (element) =>
+              normalize(element.innerText).toLowerCase() === "log in",
+          );
+        const normalizedLabels = rewardLabels.map((label) =>
+          label.toLowerCase(),
+        );
+        const reward = loggedOut
+          ? undefined
+          : controls.find((element) => {
+              const text = normalize(element.innerText).toLowerCase();
 
-    reward?.click();
+              return normalizedLabels.some((label) => text.includes(label));
+            });
+        const offers = Array.from(
+          document.querySelectorAll<HTMLAnchorElement>("a[href*='/product/']"),
+        ).map((anchor) => ({
+          title: normalize(
+            anchor.innerText ||
+              anchor.getAttribute("aria-label") ||
+              anchor.getAttribute("title"),
+          ),
+          url: anchor.href,
+        }));
 
-    return {
-      loggedIn: !loggedOut,
-      rewardClicked: Boolean(reward),
-      offers,
-    };
-  }, rewardLabels(selectors));
+        reward?.click();
+
+        return {
+          loggedIn: !loggedOut,
+          rewardClicked: Boolean(reward),
+          offers,
+        };
+      }, labels);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  }
+
+  throw lastError;
 }
 
 async function claimWithPage({
