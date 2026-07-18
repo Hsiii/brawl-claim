@@ -14,6 +14,7 @@ const NAVIGATION_TIMEOUT_MS = 60_000;
 const STORE_SETTLE_MS = 75_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const CLEANUP_TIMEOUT_MS = 15_000;
+const INSPECTION_TIMEOUT_MS = 10_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
@@ -461,63 +462,63 @@ function rewardLabels(selectors: string[]) {
 
 async function inspectStore(page: Page, selectors: string[]) {
   const labels = rewardLabels(selectors);
+  const expression = `(() => {
+    const labels = ${JSON.stringify(labels)}.map((label) => label.toLowerCase());
+    const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+    const controls = Array.from(document.querySelectorAll("button,[role='button']"))
+      .filter((element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      });
+    const bodyText = normalize(document.body?.innerText).toLowerCase();
+    const loggedOut = bodyText.includes("log in to view offers") ||
+      controls.some((element) => normalize(element.innerText).toLowerCase() === "log in");
+    const reward = loggedOut ? undefined : controls.find((element) => {
+      const text = normalize(element.innerText).toLowerCase();
+      return labels.some((label) => text.includes(label));
+    });
+    const offers = Array.from(document.querySelectorAll("a[href*='/product/']"))
+      .map((anchor) => ({
+        title: normalize(anchor.innerText || anchor.getAttribute("aria-label") || anchor.title),
+        url: anchor.href,
+      }));
+    reward?.click();
+    return { loggedIn: !loggedOut, rewardClicked: Boolean(reward), offers };
+  })()`;
   let lastError: unknown;
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const session = await page.context().newCDPSession(page);
+
     try {
-      return await page.evaluate((rewardLabels) => {
-        const normalize = (value: string | null | undefined) =>
-          (value || "").replace(/\s+/g, " ").trim();
-        const controls = Array.from(
-          document.querySelectorAll<HTMLElement>("button,[role='button']"),
-        ).filter((element) => {
-          const style = getComputedStyle(element);
+      const response = await withTimeout(
+        session.send("Runtime.evaluate", {
+          expression,
+          returnByValue: true,
+        }),
+        INSPECTION_TIMEOUT_MS,
+        "Store inspection",
+      );
+      const value = response.result.value as
+        | {
+            loggedIn: boolean;
+            rewardClicked: boolean;
+            offers: Array<{ title: string; url: string }>;
+          }
+        | undefined;
 
-          return (
-            style.display !== "none" &&
-            style.visibility !== "hidden" &&
-            element.getClientRects().length > 0
-          );
-        });
-        const bodyText = normalize(document.body?.innerText).toLowerCase();
-        const loggedOut =
-          bodyText.includes("log in to view offers") ||
-          controls.some(
-            (element) =>
-              normalize(element.innerText).toLowerCase() === "log in",
-          );
-        const normalizedLabels = rewardLabels.map((label) =>
-          label.toLowerCase(),
-        );
-        const reward = loggedOut
-          ? undefined
-          : controls.find((element) => {
-              const text = normalize(element.innerText).toLowerCase();
+      if (value && typeof value.loggedIn === "boolean") {
+        return value;
+      }
 
-              return normalizedLabels.some((label) => text.includes(label));
-            });
-        const offers = Array.from(
-          document.querySelectorAll<HTMLAnchorElement>("a[href*='/product/']"),
-        ).map((anchor) => ({
-          title: normalize(
-            anchor.innerText ||
-              anchor.getAttribute("aria-label") ||
-              anchor.getAttribute("title"),
-          ),
-          url: anchor.href,
-        }));
-
-        reward?.click();
-
-        return {
-          loggedIn: !loggedOut,
-          rewardClicked: Boolean(reward),
-          offers,
-        };
-      }, labels);
+      throw new Error("Store inspection returned no value.");
     } catch (error) {
       lastError = error;
       await new Promise((resolve) => setTimeout(resolve, 2_000));
+    } finally {
+      void session.detach().catch(() => undefined);
     }
   }
 
