@@ -13,7 +13,7 @@ const ACTION_TIMEOUT_MS = 8_000;
 const SELECTOR_PROBE_TIMEOUT_MS = 2_000;
 const NAVIGATION_TIMEOUT_MS = 45_000;
 const STORE_RELOAD_GRACE_MS = 5_000;
-const SCREENSHOT_TIMEOUT_MS = 30_000;
+const SCREENSHOT_TIMEOUT_MS = 8_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
@@ -472,13 +472,17 @@ async function screenshotTarget({
     }
   }
 
-  await page.screenshot({
-    path,
-    fullPage: false,
-    timeout: SCREENSHOT_TIMEOUT_MS,
-  });
+  try {
+    await page.screenshot({
+      path,
+      fullPage: false,
+      timeout: SCREENSHOT_TIMEOUT_MS,
+    });
 
-  return assetUrl(config, filename);
+    return assetUrl(config, filename);
+  } catch {
+    return undefined;
+  }
 }
 
 async function extractOffers(page: Page): Promise<ClaimOffer[]> {
