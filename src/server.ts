@@ -10,7 +10,7 @@ const DEFAULT_PORT = 3100;
 const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
-const NAVIGATION_TIMEOUT_MS = 45_000;
+const NAVIGATION_TIMEOUT_MS = 60_000;
 const STORE_RELOAD_GRACE_MS = 15_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
@@ -415,7 +415,10 @@ async function withTimeout<T>(
 
 async function gotoStore(page: Page) {
   await page.goto(STORE_URL, {
-    waitUntil: "domcontentloaded",
+    waitUntil: "commit",
+    timeout: NAVIGATION_TIMEOUT_MS,
+  });
+  await page.waitForLoadState("domcontentloaded", {
     timeout: NAVIGATION_TIMEOUT_MS,
   });
   await page.waitForTimeout(STORE_RELOAD_GRACE_MS);
