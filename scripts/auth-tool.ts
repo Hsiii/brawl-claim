@@ -8,7 +8,7 @@ const DEFAULT_AUTH_FILE = ".data/auth.json";
 const DEFAULT_AUTH_DIR = ".data/auth";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
 const DEFAULT_PROFILE_ROOT = ".data/auth-browser-profiles";
-const DEFAULT_PROFILES = "me,friend1,friend2";
+const DEFAULT_PROFILES = "me";
 const DEFAULT_REMOTE_HOST = "oracle";
 const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
@@ -736,12 +736,18 @@ async function closeChrome() {
 }
 
 function renderPage() {
-  const profileOptions = profiles
-    .map(
-      (profile) =>
-        `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`,
-    )
-    .join("");
+  const profileField =
+    profiles.length > 1
+      ? `<div class="field">
+        <label for="profile">Profile</label>
+        <select id="profile">${profiles
+          .map(
+            (profile) =>
+              `<option value="${escapeHtml(profile.id)}">${escapeHtml(profile.label)}</option>`,
+          )
+          .join("")}</select>
+      </div>`
+      : `<input id="profile" type="hidden" value="${escapeHtml(profiles[0].id)}">`;
 
   return `<!doctype html>
 <html lang="en">
@@ -857,10 +863,7 @@ function renderPage() {
     </header>
 
     <section class="panel">
-      <div class="field">
-        <label for="profile">Profile</label>
-        <select id="profile">${profileOptions}</select>
-      </div>
+      ${profileField}
       <div class="actions">
         <button id="open">Open Store</button>
         <button id="save">Save</button>
@@ -948,9 +951,11 @@ function renderPage() {
     document.querySelector("#status").addEventListener("click", () => {
       run(() => call("/api/status"), formatStatus);
     });
-    profileSelect.addEventListener("change", () => {
-      run(() => call("/api/status"), formatStatus);
-    });
+    if (profileSelect.tagName === "SELECT") {
+      profileSelect.addEventListener("change", () => {
+        run(() => call("/api/status"), formatStatus);
+      });
+    }
 
     run(() => call("/api/status"), formatStatus);
   </script>

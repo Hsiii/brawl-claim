@@ -31,9 +31,15 @@ status plus screenshots under the configured data directory. To run one profile:
 bun run claim -- --profile friend1
 ```
 
-`bun run auth:setup` starts a local-only helper page. Choose a profile, open
-Supercell Store in that profile's dedicated Chrome auth profile, log into
-Supercell ID, save the Playwright storage state, and upload it to Oracle.
+`bun run auth:setup` starts a local-only helper page for your account. Open the
+Supercell Store, log into Supercell ID, save the Playwright storage state, and
+upload it to Oracle.
+
+Friend profiles are optional. To configure them later, start the helper with:
+
+```bash
+AUTH_TOOL_PROFILES=me,friend1,friend2 bun run auth:setup
+```
 
 ## Configuration
 
@@ -42,7 +48,7 @@ Primary environment variables:
 ```env
 BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH=/brawlstars
 BRAWL_STARS_CLAIMER_DATA_DIR=/app/state
-BRAWL_STARS_CLAIMER_PROFILES=me,friend1,friend2
+BRAWL_STARS_CLAIMER_PROFILES=me
 BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=/app/state/auth.json
 BRAWL_STARS_CLAIMER_ACCESS_USERNAME=
 BRAWL_STARS_CLAIMER_ACCESS_PASSWORD=
