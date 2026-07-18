@@ -11,7 +11,7 @@ const DEFAULT_DATA_DIR = ".data/brawl-stars-claimer";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
 const NAVIGATION_TIMEOUT_MS = 60_000;
-const STORE_SETTLE_MS = 75_000;
+const STORE_SETTLE_MS = 110_000;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const CLEANUP_TIMEOUT_MS = 15_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
@@ -24,6 +24,7 @@ const CLAIM_FLAGS = new Set([
   "--claim-supercell-reward",
   "--capture-once",
 ]);
+const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
 
 type ClaimStatus = "claimed" | "no_reward" | "login_required" | "error";
 
@@ -569,11 +570,13 @@ async function claimWithPage({
       title: compactText(offer.title),
       url: offer.url,
     }));
-  const imageUrl = await screenshotTarget({
-    config,
-    filename: profile.screenshotFilename,
-    page,
-  });
+  const imageUrl = IS_CLAIM_ONCE
+    ? undefined
+    : await screenshotTarget({
+        config,
+        filename: profile.screenshotFilename,
+        page,
+      });
 
   return {
     status,
@@ -640,18 +643,22 @@ async function claimBrawlStarsReward(
             profile,
           });
         } finally {
-          await withTimeout(
-            context.close(),
-            CLEANUP_TIMEOUT_MS,
-            "Browser context cleanup",
-          ).catch(() => undefined);
+          if (!IS_CLAIM_ONCE) {
+            await withTimeout(
+              context.close(),
+              CLEANUP_TIMEOUT_MS,
+              "Browser context cleanup",
+            ).catch(() => undefined);
+          }
         }
       } finally {
-        await withTimeout(
-          browser.close(),
-          CLEANUP_TIMEOUT_MS,
-          "Browser cleanup",
-        ).catch(() => undefined);
+        if (!IS_CLAIM_ONCE) {
+          await withTimeout(
+            browser.close(),
+            CLEANUP_TIMEOUT_MS,
+            "Browser cleanup",
+          ).catch(() => undefined);
+        }
       }
     })(),
     config.claimTimeoutMs,
@@ -1156,7 +1163,7 @@ function argumentValue(name: string) {
   return undefined;
 }
 
-if (process.argv.some((argument) => CLAIM_FLAGS.has(argument))) {
+if (IS_CLAIM_ONCE) {
   const profileId =
     argumentValue("--profile") || readEnv("BRAWL_STARS_CLAIMER_PROFILE");
   const nextState = await runClaimNow(profileId);
