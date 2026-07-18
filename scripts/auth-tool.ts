@@ -9,7 +9,6 @@ const DEFAULT_AUTH_DIR = ".data/auth";
 const DEFAULT_PROFILE_DIR = ".data/auth-browser-profile";
 const DEFAULT_PROFILE_ROOT = ".data/auth-browser-profiles";
 const DEFAULT_PROFILES = "me";
-const DEFAULT_REMOTE_HOST = "platform";
 const DEFAULT_CHROME_APP_NAME = "Google Chrome";
 const DEFAULT_CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -22,7 +21,6 @@ const REMOTE_COMPOSE_FILE =
   `${REMOTE_OPERATIONS_DIR}/services/brawl-claimer/compose.yaml`;
 const REMOTE_SERVICE = "brawl-claimer";
 const REMOTE_ENV_FILE = "/srv/platform/secrets/brawl-claimer.env";
-const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
 const STORE_URL = "https://store.supercell.com/brawlstars";
 
 type AuthProfile = {
@@ -77,7 +75,8 @@ type StorageState = {
 const token = crypto.randomUUID();
 const host = process.env.AUTH_TOOL_HOST || DEFAULT_HOST;
 const port = Number(process.env.AUTH_TOOL_PORT || DEFAULT_PORT);
-const remoteHost = process.env.AUTH_TOOL_REMOTE_HOST || DEFAULT_REMOTE_HOST;
+const remoteHost = process.env.AUTH_TOOL_REMOTE_HOST?.trim() || "";
+const dashboardUrl = process.env.AUTH_TOOL_DASHBOARD_URL?.trim() || "";
 const chromeAppName =
   process.env.AUTH_TOOL_CHROME_APP_NAME || DEFAULT_CHROME_APP_NAME;
 const chromePath = process.env.AUTH_TOOL_CHROME_PATH || DEFAULT_CHROME_PATH;
@@ -661,6 +660,10 @@ async function runCommand(command: string[], options?: { input?: string }) {
 }
 
 async function uploadAuthState(profile = profiles[0]) {
+  if (!remoteHost) {
+    throw new Error("Set AUTH_TOOL_REMOTE_HOST to enable remote uploads.");
+  }
+
   if (!existsSync(profile.authFile)) {
     throw new Error("No auth file saved yet. Save first, then upload.");
   }
@@ -717,7 +720,7 @@ rm -f ${profile.remoteTmpAuthFile}
     profileId: profile.id,
     profileLabel: profile.label,
     remoteAuthFile: profile.remoteAuthFile,
-    dashboardUrl: DASHBOARD_URL,
+    dashboardUrl: dashboardUrl || undefined,
   };
 }
 
@@ -862,7 +865,7 @@ function renderPage() {
         <h1>BrawlClaim Auth Setup</h1>
         <p>Save your Supercell Store login for scheduled claims.</p>
       </div>
-      <a href="${DASHBOARD_URL}">Dashboard</a>
+      ${dashboardUrl ? `<a href="${escapeHtml(dashboardUrl)}">Dashboard</a>` : ""}
     </header>
 
     <section class="panel">
@@ -870,7 +873,7 @@ function renderPage() {
       <div class="actions">
         <button id="open">Open Store</button>
         <button id="save">Save</button>
-        <button id="upload">Upload</button>
+        ${remoteHost ? '<button id="upload">Upload</button>' : ""}
       </div>
     </section>
 
@@ -945,10 +948,10 @@ function renderPage() {
         (value) => "Saved " + value.saved.profileLabel + " locally (" + value.saved.cookieCount + " cookies)."
       );
     });
-    document.querySelector("#upload").addEventListener("click", () => {
+    document.querySelector("#upload")?.addEventListener("click", () => {
       run(
         () => call("/api/upload", {}),
-        (value) => "Uploaded " + value.uploaded.profileLabel + " to Oracle."
+        (value) => "Uploaded " + value.uploaded.profileLabel + " to " + value.uploaded.remoteHost + "."
       );
     });
     document.querySelector("#status").addEventListener("click", () => {

@@ -39,6 +39,10 @@ AUTH_TOOL_PROFILES='me:Me,friend:Friend' bun run auth:setup
 Each account owner should sign in to their own profile. Configure matching
 `BRAWL_STARS_CLAIMER_PROFILES` and per-profile auth paths before running claims.
 
+The helper shows only local controls by default. Set `AUTH_TOOL_REMOTE_HOST` to
+enable its operator-specific SSH upload action and `AUTH_TOOL_DASHBOARD_URL` to
+show a dashboard link.
+
 ## Run with Docker Compose
 
 Build and start the service:
