@@ -13,6 +13,11 @@ import { dirname, join } from "node:path";
 import type { Browser, BrowserContext, Frame, Locator, Page } from "playwright";
 import { chromium } from "playwright";
 
+import {
+  handleDiscordInteraction,
+  notifyLinkedDiscordUsers,
+} from "./discord";
+
 const APP_NAME = "BrawlClaim";
 const STORE_URL = "https://store.supercell.com/brawlstars";
 const DEFAULT_PORT = 3100;
@@ -96,6 +101,8 @@ type AppConfig = {
   claimEnabled: boolean;
   claimTimeoutMs: number;
   dataDir: string;
+  discordBotToken?: string;
+  discordPublicKey?: string;
   intervalMs: number;
   profiles: ClaimProfile[];
   publicBasePath: string;
@@ -250,6 +257,8 @@ function getConfig(): AppConfig {
       Number(readEnv("BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS")) ||
       DEFAULT_CLAIM_TIMEOUT_MS,
     dataDir,
+    discordBotToken: readEnv("BRAWL_CLAIM_DISCORD_BOT_TOKEN"),
+    discordPublicKey: readEnv("BRAWL_CLAIM_DISCORD_PUBLIC_KEY"),
     intervalMs:
       Number(readEnv("BRAWL_STARS_CLAIMER_INTERVAL_MINUTES")) *
         60 *
@@ -1067,6 +1076,16 @@ async function runClaimNow(profileId?: string) {
       };
       await saveClaimState(claimState, config);
 
+      await notifyLinkedDiscordUsers({
+        botToken: config.discordBotToken,
+        dataDir: config.dataDir,
+        results: targetProfiles.flatMap((profile) => {
+          const result = claimState.profiles[profile.id]?.result;
+
+          return result ? [{ profile, result }] : [];
+        }),
+      });
+
       return claimState;
     } finally {
       await releaseLock();
@@ -1468,6 +1487,19 @@ async function handleRequest(request: Request) {
 
   if (!pathname) {
     return new Response("Not found", { status: 404 });
+  }
+
+  if (
+    request.method === "POST" &&
+    pathname === "/api/discord/interactions"
+  ) {
+    return handleDiscordInteraction(request, {
+      dataDir: config.dataDir,
+      getResult: async (profileId) =>
+        (await getClaimState()).profiles[profileId]?.result,
+      profiles: config.profiles,
+      publicKey: config.discordPublicKey,
+    });
   }
 
   if (pathname === "/api/health") {

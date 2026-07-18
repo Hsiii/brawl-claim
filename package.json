@@ -10,6 +10,8 @@
     "claim": "bun src/server.ts --claim-once",
     "deploy": "bun scripts/deploy.mjs",
     "dev": "bun --watch src/server.ts",
+    "discord:link-code": "bun scripts/discord-link-code.ts",
+    "discord:register": "bun scripts/register-discord.ts",
     "start": "bun src/server.ts"
   },
   "dependencies": {

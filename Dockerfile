@@ -14,6 +14,7 @@ RUN if [ "$INSTALL_PLAYWRIGHT_BROWSERS" = "true" ]; then bunx playwright install
 RUN apt-get update && apt-get install -y --no-install-recommends xauth && rm -rf /var/lib/apt/lists/*
 
 COPY src ./src
+COPY scripts ./scripts
 COPY tsconfig.json ./tsconfig.json
 RUN mkdir -p /app/state && chown -R bun:bun /app/state
 
