@@ -17,8 +17,11 @@ const DEFAULT_CDP_PORT = 9322;
 const REMOTE_TMP_AUTH_FILE_PREFIX = "/tmp/brawl-stars-claimer-auth";
 const REMOTE_DEFAULT_AUTH_FILE = "/app/state/auth.json";
 const REMOTE_PROFILE_AUTH_ROOT = "/app/state/profiles";
-const REMOTE_INFRA_DIR = "/srv/platform/infra";
-const REMOTE_ENV_FILE = "/srv/platform/secrets/brawl-stars-claimer.env";
+const REMOTE_OPERATIONS_DIR = "/srv/platform/operations";
+const REMOTE_COMPOSE_FILE =
+  `${REMOTE_OPERATIONS_DIR}/services/brawl-claimer/compose.yaml`;
+const REMOTE_SERVICE = "brawl-claimer";
+const REMOTE_ENV_FILE = "/srv/platform/secrets/brawl-claimer.env";
 const DASHBOARD_URL = "https://bot.hsichen.dev/brawlstars/";
 const STORE_URL = "https://store.supercell.com/brawlstars";
 
@@ -690,10 +693,10 @@ set_env() {
     needs_deploy=1
   fi
 }
-container_id="$(sudo docker compose -f ${REMOTE_INFRA_DIR}/compose.yaml ps -q brawl-stars-claimer)"
+container_id="$(sudo docker compose -f ${REMOTE_COMPOSE_FILE} ps -q ${REMOTE_SERVICE})"
 if [ -z "$container_id" ]; then
-  ${REMOTE_INFRA_DIR}/scripts/deploy-brawlstars
-  container_id="$(sudo docker compose -f ${REMOTE_INFRA_DIR}/compose.yaml ps -q brawl-stars-claimer)"
+  ${REMOTE_OPERATIONS_DIR}/scripts/deploy-brawl-claimer
+  container_id="$(sudo docker compose -f ${REMOTE_COMPOSE_FILE} ps -q ${REMOTE_SERVICE})"
 fi
 sudo docker exec -u root "$container_id" mkdir -p "$(dirname "$remote_auth_file")"
 sudo docker cp ${profile.remoteTmpAuthFile} "$container_id:$remote_auth_file"
@@ -702,7 +705,7 @@ sudo docker exec -u root "$container_id" chmod 600 "$remote_auth_file"
 set_env BRAWL_STARS_CLAIMER_PROFILES "$desired_profiles"
 set_env BRAWL_STARS_CLAIMER_AUTH_STATE_FILE "$desired_auth_file"
 if [ "$needs_deploy" = "1" ]; then
-  ${REMOTE_INFRA_DIR}/scripts/deploy-brawlstars
+  ${REMOTE_OPERATIONS_DIR}/scripts/deploy-brawl-claimer
 fi
 rm -f ${profile.remoteTmpAuthFile}
 `;

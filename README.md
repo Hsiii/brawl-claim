@@ -65,7 +65,7 @@ The shared platform host owns the production service and its systemd timer. The 
 Useful operator commands:
 
 ```bash
-ssh platform /srv/platform/infra/scripts/claim-brawlstars-reward --profile me
+ssh platform /srv/platform/jobs/brawl-claimer/claim --profile me
 ssh platform systemctl status platform-brawlstars-claim.timer
 ssh platform journalctl -u platform-brawlstars-claim.service
 ```
@@ -103,6 +103,7 @@ The service reads these environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `BRAWL_CLAIM_ENABLED` | `false` | Enable the service's internal recurring claim loop |
 | `BRAWL_STARS_CLAIMER_PROFILES` | `me` | Comma-separated profile IDs or `id:Label` entries |
 | `BRAWL_STARS_CLAIMER_AUTH_STATE_FILE` | profile data directory | Playwright storage-state file for the first profile |
 | `BRAWL_STARS_CLAIMER_DATA_DIR` | `.data/brawl-stars-claimer` | Claim state and optional screenshots |

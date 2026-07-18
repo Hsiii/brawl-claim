@@ -199,10 +199,7 @@ function getConfig(): AppConfig {
   cachedConfig = {
     accessPassword: readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD"),
     accessUsername: readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME"),
-    claimEnabled: parseBoolean(
-      readEnv("BRAWL_STARS_CLAIMER_ENABLED"),
-      false,
-    ),
+    claimEnabled: parseBoolean(readEnv("BRAWL_CLAIM_ENABLED"), false),
     claimTimeoutMs:
       Number(readEnv("BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS")) ||
       DEFAULT_CLAIM_TIMEOUT_MS,

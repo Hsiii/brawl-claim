@@ -1,5 +1,5 @@
 services:
-  brawl-stars-claimer:
+  brawl-claimer:
     build: .
     restart: unless-stopped
     cpus: 0.5
@@ -10,7 +10,7 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - brawl-stars-claimer-state:/app/state
+      - brawl-claimer-state:/app/state
 
 volumes:
-  brawl-stars-claimer-state:
+  brawl-claimer-state:
