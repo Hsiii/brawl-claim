@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 
-const repository = "Hsiii/BrawlStarsStoreClaimer";
+const repository = process.env.GITHUB_REPOSITORY ?? "Hsiii/brawl-claim";
 const workflow = "image.yml";
 const service = "brawl-claimer";
 const remoteHost = process.env.PLATFORM_HOST ?? "platform";

@@ -3,6 +3,15 @@
   "version": "0.1.0",
   "description": "BrawlClaim checks the official Supercell Store for available Brawl Stars rewards.",
   "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/Hsiii/brawl-claim#readme",
+  "bugs": {
+    "url": "https://github.com/Hsiii/brawl-claim/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Hsiii/brawl-claim.git"
+  },
   "type": "module",
   "scripts": {
     "auth:setup": "bun scripts/auth-tool.ts",

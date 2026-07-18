@@ -1,9 +1,12 @@
-node_modules
+.git
+.github
+.data
 .env*
-!.env.example
-.data/
+node_modules
 dist
 coverage
 *.log
 *.tsbuildinfo
 .DS_Store
+README.md
+docs

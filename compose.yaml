@@ -7,6 +7,9 @@ services:
     shm_size: 512mb
     env_file:
       - .env.local
+    environment:
+      BRAWL_STARS_CLAIMER_AUTH_STATE_FILE: /app/state/auth.json
+      BRAWL_STARS_CLAIMER_DATA_DIR: /app/state
     ports:
       - "3100:3100"
     volumes:
