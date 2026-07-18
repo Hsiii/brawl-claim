@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "morning-dashboard",
+      "name": "brawl-stars-store-claimer",
       "dependencies": {
         "playwright": "^1.61.1",
       },

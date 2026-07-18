@@ -1,5 +1,5 @@
 services:
-  morning-dashboard:
+  brawl-stars-claimer:
     build: .
     restart: unless-stopped
     cpus: 0.5
@@ -10,7 +10,7 @@ services:
     ports:
       - "3100:3100"
     volumes:
-      - morning-dashboard-state:/app/state
+      - brawl-stars-claimer-state:/app/state
 
 volumes:
-  morning-dashboard-state:
+  brawl-stars-claimer-state:

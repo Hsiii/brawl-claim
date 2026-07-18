@@ -1,72 +1,127 @@
 # Brawl Stars Store Claimer
 
-A small Bun and Playwright service for one job: opening the official Supercell
-Store Brawl Stars page and claiming the visible daily reward button for each
-configured profile when its saved auth state is logged in.
+A focused Bun and Playwright service that opens the official Supercell Store,
+checks the Brawl Stars page, and clicks a visible `Claim` or `Collect` reward
+for a saved Supercell ID.
 
-It does not bypass login challenges, captchas, email codes, or two-factor
-prompts. If Supercell shows a login prompt, refresh the saved auth state.
+The production bot runs every day at **5:00 PM GMT+8**. It only uses a login
+session you create yourself and does not bypass captchas, email codes,
+two-factor authentication, or other Supercell security checks.
 
-## Setup
+## First-Time Setup
+
+Requirements:
+
+- [Bun](https://bun.sh/) and Google Chrome on your Mac
+- SSH access to the `oracle` host for production upload and deployment
+
+Install the project and Playwright browser:
 
 ```bash
 bun install
 bunx playwright install chromium
-bun run dev
 ```
 
-Open `http://localhost:3100`.
-
-## Commands
+Start the local auth helper:
 
 ```bash
-bun run claim
 bun run auth:setup
 ```
 
-`bun run claim` runs the claim flow once for all configured profiles and writes
-status plus screenshots under the configured data directory. To run one profile:
+Open the one-time localhost URL printed in the terminal, then:
+
+1. Click **Open Store**.
+2. Sign in to your Supercell ID in the dedicated Chrome window.
+3. Return to the auth helper and click **Save**.
+4. Click **Upload** to send the saved session to Oracle.
+
+Passwords and verification codes are entered only on Supercell's website. The
+helper stores browser state locally in `.data/auth.json`, uploads it with file
+mode `0600`, and never asks for account credentials itself.
+
+## Run A Check
+
+Run the claimer locally for the default `me` profile:
 
 ```bash
-bun run claim -- --profile friend1
+bun run claim -- --profile me
 ```
 
-`bun run auth:setup` starts a local-only helper page for your account. Open the
-Supercell Store, log into Supercell ID, save the Playwright storage state, and
-upload it to Oracle.
+Possible results:
 
-Friend profiles are optional. To configure them later, start the helper with:
+- `claimed`: a visible reward button was clicked.
+- `no_reward`: login is valid, but no reward button is currently available.
+- `login_required`: the saved Supercell session must be refreshed.
+- `error`: the store or browser did not complete the check.
+
+The production dashboard is available at
+[bot.hsichen.dev/brawlstars](https://bot.hsichen.dev/brawlstars/).
+
+## Daily Schedule
+
+Oracle owns the production service and its systemd timer. The timer runs at
+`09:00:00 UTC`, which is `17:00:00 GMT+8`, and persists across reboots.
+
+Useful operator commands:
+
+```bash
+ssh oracle /home/ubuntu/bots/oracle/scripts/claim-brawlstars-reward --profile me
+ssh oracle systemctl status oracle-brawlstars-claim.timer
+ssh oracle journalctl -u oracle-brawlstars-claim.service
+```
+
+Deploy committed changes from `main` with:
+
+```bash
+bun run deploy
+```
+
+## Optional Friend Profiles
+
+The default setup contains only `me`. Friends are opt-in and each person gets a
+separate Chrome profile, auth file, dashboard status, and claim run.
+
+Start auth setup with additional profiles:
 
 ```bash
 AUTH_TOOL_PROFILES=me,friend1,friend2 bun run auth:setup
 ```
 
-## Configuration
+You can add display names with `id:Label` entries:
 
-Primary environment variables:
-
-```env
-BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH=/brawlstars
-BRAWL_STARS_CLAIMER_DATA_DIR=/app/state
-BRAWL_STARS_CLAIMER_PROFILES=me
-BRAWL_STARS_CLAIMER_AUTH_STATE_FILE=/app/state/auth.json
-BRAWL_STARS_CLAIMER_ACCESS_USERNAME=
-BRAWL_STARS_CLAIMER_ACCESS_PASSWORD=
-BRAWL_STARS_CLAIMER_REFRESH_TOKEN=
-BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS=180000
-BRAWL_STARS_CLAIMER_REWARD_SELECTORS=button:has-text("Claim"),button:has-text("Collect")
+```bash
+AUTH_TOOL_PROFILES='me:Hsi,friend1:Alex,friend2:Sam' bun run auth:setup
 ```
 
-`BRAWL_STARS_CLAIMER_PROFILES` is a comma-separated list of profile IDs. Use
-`id:Label` when you want friendlier names, for example
-`me:Hsi,friend1:Alex,friend2:Sam`. The first profile keeps using
-`BRAWL_STARS_CLAIMER_AUTH_STATE_FILE`; later profiles default to
-`/app/state/profiles/<id>/auth.json`.
+Each friend should sign in to their own Supercell ID, then use **Save** and
+**Upload** for that selected profile. To return production to one account, run
+the helper without `AUTH_TOOL_PROFILES` and upload `me` again.
 
-The old `MORNING_*` variables are still accepted as fallbacks during migration.
+## Configuration
 
-## Oracle
+The service reads these environment variables:
 
-Production deployment is owned by the `oracle` runtime repo. The app is still
-checked out on the VM at `/home/ubuntu/bots/apps/morning`, but the service is
-deployed as the Brawl Stars Store Claimer.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BRAWL_STARS_CLAIMER_PROFILES` | `me` | Comma-separated profile IDs or `id:Label` entries |
+| `BRAWL_STARS_CLAIMER_AUTH_STATE_FILE` | profile data directory | Playwright storage-state file for the first profile |
+| `BRAWL_STARS_CLAIMER_DATA_DIR` | `.data/brawl-stars-claimer` | Claim state and optional screenshots |
+| `BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH` | empty | URL prefix such as `/brawlstars` |
+| `BRAWL_STARS_CLAIMER_ACCESS_USERNAME` | empty | Optional dashboard Basic Auth username |
+| `BRAWL_STARS_CLAIMER_ACCESS_PASSWORD` | empty | Optional dashboard Basic Auth password |
+| `BRAWL_STARS_CLAIMER_REFRESH_TOKEN` | empty | Optional bearer token for remote claim requests |
+| `BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS` | `180000` | Maximum duration of one profile check |
+| `BRAWL_STARS_CLAIMER_REWARD_SELECTORS` | Claim/Collect buttons | Comma-separated Playwright selectors |
+
+For local dashboard development:
+
+```bash
+bun run dev
+```
+
+Then open [localhost:3100](http://localhost:3100).
+
+## Disclaimer
+
+This is a personal automation tool and is not affiliated with, endorsed by, or
+sponsored by Supercell. Brawl Stars and Supercell are trademarks of Supercell.

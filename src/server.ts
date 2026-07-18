@@ -20,11 +20,7 @@ const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
 const STATE_FILE = "claimer.json";
 const DEFAULT_PROFILE_ID = "me";
-const CLAIM_FLAGS = new Set([
-  "--claim-once",
-  "--claim-supercell-reward",
-  "--capture-once",
-]);
+const CLAIM_FLAGS = new Set(["--claim-once"]);
 const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
 
 type ClaimStatus = "claimed" | "no_reward" | "login_required" | "error";
@@ -94,12 +90,8 @@ let claimState: ClaimState = {
 let activeClaim: Promise<ClaimState> | null = null;
 let cachedConfig: AppConfig | undefined;
 
-function readEnv(name: string, legacyName?: string) {
-  return (
-    process.env[name]?.trim() ||
-    (legacyName ? process.env[legacyName]?.trim() : undefined) ||
-    undefined
-  );
+function readEnv(name: string) {
+  return process.env[name]?.trim() || undefined;
 }
 
 function parseBoolean(value: string | undefined, fallback: boolean) {
@@ -201,25 +193,14 @@ function getConfig(): AppConfig {
     return cachedConfig;
   }
 
-  const dataDir =
-    readEnv("BRAWL_STARS_CLAIMER_DATA_DIR", "MORNING_SCREENSHOT_DIR") ||
-    DEFAULT_DATA_DIR;
-  const authStateFile = readEnv(
-    "BRAWL_STARS_CLAIMER_AUTH_STATE_FILE",
-    "MORNING_AUTH_STATE_FILE",
-  );
+  const dataDir = readEnv("BRAWL_STARS_CLAIMER_DATA_DIR") || DEFAULT_DATA_DIR;
+  const authStateFile = readEnv("BRAWL_STARS_CLAIMER_AUTH_STATE_FILE");
 
   cachedConfig = {
-    accessPassword: readEnv(
-      "BRAWL_STARS_CLAIMER_ACCESS_PASSWORD",
-      "MORNING_ACCESS_PASSWORD",
-    ),
-    accessUsername: readEnv(
-      "BRAWL_STARS_CLAIMER_ACCESS_USERNAME",
-      "MORNING_ACCESS_USERNAME",
-    ),
+    accessPassword: readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD"),
+    accessUsername: readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME"),
     claimEnabled: parseBoolean(
-      readEnv("BRAWL_STARS_CLAIMER_ENABLED", "MORNING_CAPTURE_ENABLED"),
+      readEnv("BRAWL_STARS_CLAIMER_ENABLED"),
       false,
     ),
     claimTimeoutMs:
@@ -227,27 +208,16 @@ function getConfig(): AppConfig {
       DEFAULT_CLAIM_TIMEOUT_MS,
     dataDir,
     intervalMs:
-      Number(
-        readEnv(
-          "BRAWL_STARS_CLAIMER_INTERVAL_MINUTES",
-          "MORNING_CAPTURE_INTERVAL_MINUTES",
-        ),
-      ) *
+      Number(readEnv("BRAWL_STARS_CLAIMER_INTERVAL_MINUTES")) *
         60 *
         1000 || DEFAULT_INTERVAL_MINUTES * 60 * 1000,
     profiles: parseProfiles(dataDir, authStateFile),
     publicBasePath: normalizeBasePath(
-      readEnv("BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH", "MORNING_PUBLIC_BASE_PATH"),
+      readEnv("BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH"),
     ),
-    refreshToken: readEnv(
-      "BRAWL_STARS_CLAIMER_REFRESH_TOKEN",
-      "MORNING_REFRESH_TOKEN",
-    ),
+    refreshToken: readEnv("BRAWL_STARS_CLAIMER_REFRESH_TOKEN"),
     rewardSelectors: (
-      readEnv(
-        "BRAWL_STARS_CLAIMER_REWARD_SELECTORS",
-        "MORNING_SUPERCELL_REWARD_SELECTORS",
-      ) ||
+      readEnv("BRAWL_STARS_CLAIMER_REWARD_SELECTORS") ||
       'button:has-text("Claim"),button:has-text("Collect"),[role="button"]:has-text("Claim"),[role="button"]:has-text("Collect")'
     )
       .split(",")

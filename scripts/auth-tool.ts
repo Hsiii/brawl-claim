@@ -754,7 +754,7 @@ function renderPage() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Brawl Stars Claimer Auth Setup</title>
+  <title>Brawl Stars Store Claimer - Auth Setup</title>
   <style>
     :root {
       --color-bg: #111315;
@@ -857,7 +857,7 @@ function renderPage() {
     <header>
       <div>
         <h1>Auth Setup</h1>
-        <p>Brawl Stars Store profiles.</p>
+        <p>Save your Supercell Store login for scheduled claims.</p>
       </div>
       <a href="${DASHBOARD_URL}">Claimer</a>
     </header>
