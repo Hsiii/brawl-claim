@@ -109,16 +109,17 @@ The service reads these environment variables:
 | `BRAWL_STARS_CLAIMER_AUTH_STATE_FILE` | profile data directory | Playwright storage-state file for the first profile |
 | `BRAWL_STARS_CLAIMER_DATA_DIR` | `.data/brawl-claim` | Claim state and optional screenshots |
 | `BRAWL_STARS_CLAIMER_PUBLIC_BASE_PATH` | empty | URL prefix such as `/brawlstars` |
-| `BRAWL_STARS_CLAIMER_ACCESS_USERNAME` | empty | Optional dashboard Basic Auth username |
-| `BRAWL_STARS_CLAIMER_ACCESS_PASSWORD` | empty | Optional dashboard Basic Auth password |
-| `BRAWL_STARS_CLAIMER_REFRESH_TOKEN` | empty | Optional bearer token for remote claim requests |
+| `BRAWL_STARS_CLAIMER_ALLOW_INSECURE_ACCESS` | `false` | Allow dashboard access without authentication; local development only |
+| `BRAWL_STARS_CLAIMER_ACCESS_USERNAME` | empty | Dashboard Basic Auth username |
+| `BRAWL_STARS_CLAIMER_ACCESS_PASSWORD` | empty | Dashboard Basic Auth password |
+| `BRAWL_STARS_CLAIMER_REFRESH_TOKEN` | empty | Bearer token for remote claim requests |
 | `BRAWL_STARS_CLAIMER_CLAIM_TIMEOUT_MS` | `180000` | Maximum duration of one profile check |
 | `BRAWL_STARS_CLAIMER_REWARD_SELECTORS` | Claim/Collect buttons | Comma-separated Playwright selectors |
 
 For local dashboard development:
 
 ```bash
-bun run dev
+BRAWL_STARS_CLAIMER_ALLOW_INSECURE_ACCESS=true bun run dev
 ```
 
 Then open [localhost:3100](http://localhost:3100).

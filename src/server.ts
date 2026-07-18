@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -22,6 +23,7 @@ const STATE_FILE = "claim.json";
 const DEFAULT_PROFILE_ID = "me";
 const CLAIM_FLAGS = new Set(["--claim-once"]);
 const IS_CLAIM_ONCE = process.argv.some((argument) => CLAIM_FLAGS.has(argument));
+const CSRF_TOKEN = crypto.randomUUID();
 
 type ClaimStatus = "claimed" | "no_reward" | "login_required" | "error";
 
@@ -69,6 +71,7 @@ type ClaimState = {
 type AppConfig = {
   accessPassword?: string;
   accessUsername?: string;
+  allowInsecureAccess: boolean;
   claimEnabled: boolean;
   claimTimeoutMs: number;
   dataDir: string;
@@ -195,10 +198,22 @@ function getConfig(): AppConfig {
 
   const dataDir = readEnv("BRAWL_STARS_CLAIMER_DATA_DIR") || DEFAULT_DATA_DIR;
   const authStateFile = readEnv("BRAWL_STARS_CLAIMER_AUTH_STATE_FILE");
+  const accessPassword = readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD");
+  const accessUsername = readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME");
+
+  if (Boolean(accessPassword) !== Boolean(accessUsername)) {
+    throw new Error(
+      "BRAWL_STARS_CLAIMER_ACCESS_USERNAME and BRAWL_STARS_CLAIMER_ACCESS_PASSWORD must be configured together.",
+    );
+  }
 
   cachedConfig = {
-    accessPassword: readEnv("BRAWL_STARS_CLAIMER_ACCESS_PASSWORD"),
-    accessUsername: readEnv("BRAWL_STARS_CLAIMER_ACCESS_USERNAME"),
+    accessPassword,
+    accessUsername,
+    allowInsecureAccess: parseBoolean(
+      readEnv("BRAWL_STARS_CLAIMER_ALLOW_INSECURE_ACCESS"),
+      false,
+    ),
     claimEnabled: parseBoolean(
       readEnv("BRAWL_CLAIM_ENABLED"),
       false,
@@ -738,12 +753,27 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+function secureEqual(actual: string, expected: string) {
+  const actualBuffer = Buffer.from(actual);
+  const expectedBuffer = Buffer.from(expected);
+
+  return (
+    actualBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(actualBuffer, expectedBuffer)
+  );
+}
+
 function isRefreshAuthorized(request: Request, config: AppConfig) {
   if (!config.refreshToken) {
-    return true;
+    return false;
   }
 
-  return request.headers.get("authorization") === `Bearer ${config.refreshToken}`;
+  const authorization = request.headers.get("authorization");
+
+  return Boolean(
+    authorization?.startsWith("Bearer ") &&
+      secureEqual(authorization.slice("Bearer ".length), config.refreshToken),
+  );
 }
 
 function getBasicAuthCredentials(request: Request) {
@@ -768,15 +798,29 @@ function getBasicAuthCredentials(request: Request) {
 
 function isAccessAuthorized(request: Request, config: AppConfig) {
   if (!config.accessUsername || !config.accessPassword) {
-    return true;
+    return config.allowInsecureAccess;
   }
 
   const credentials = getBasicAuthCredentials(request);
 
-  return (
-    credentials?.username === config.accessUsername &&
-    credentials.password === config.accessPassword
+  return Boolean(
+    credentials &&
+      secureEqual(credentials.username, config.accessUsername) &&
+      secureEqual(credentials.password, config.accessPassword)
   );
+}
+
+async function isCsrfAuthorized(request: Request) {
+  const contentType = request.headers.get("content-type") || "";
+
+  if (!contentType.includes("application/x-www-form-urlencoded")) {
+    return false;
+  }
+
+  const form = await request.formData();
+  const csrfToken = form.get("csrfToken");
+
+  return typeof csrfToken === "string" && secureEqual(csrfToken, CSRF_TOKEN);
 }
 
 function unauthorizedResponse() {
@@ -831,6 +875,7 @@ function renderProfileCard(profileState: ProfileClaimState, config: AppConfig) {
         <p class="meta">Last checked: ${escapeHtml(renderCheckedAt(result))}</p>
       </div>
       <form method="post" action="${config.publicBasePath}/api/claim?profile=${encodeURIComponent(profileState.id)}">
+        <input type="hidden" name="csrfToken" value="${CSRF_TOKEN}">
         <button type="submit">${profileState.claiming ? "Claiming..." : "Claim"}</button>
       </form>
     </div>
@@ -1011,6 +1056,7 @@ function renderPage(state: ClaimState, config: AppConfig) {
         <p class="meta">Last full run: ${escapeHtml(checkedAt)}</p>
       </div>
       <form method="post" action="${config.publicBasePath}/api/claim">
+        <input type="hidden" name="csrfToken" value="${CSRF_TOKEN}">
         <button type="submit">${state.claiming ? "Claiming..." : "Claim all"}</button>
       </form>
     </section>
@@ -1020,20 +1066,77 @@ function renderPage(state: ClaimState, config: AppConfig) {
 </html>`;
 }
 
+function stripBasePath(pathname: string, basePath: string) {
+  if (!basePath) {
+    return pathname;
+  }
+
+  if (pathname === basePath) {
+    return "/";
+  }
+
+  if (!pathname.startsWith(`${basePath}/`)) {
+    return undefined;
+  }
+
+  return pathname.slice(basePath.length) || "/";
+}
+
+function htmlHeaders() {
+  return {
+    "cache-control": "no-store",
+    "content-security-policy":
+      "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    "content-type": "text/html; charset=utf-8",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+  };
+}
+
 async function handleRequest(request: Request) {
   const config = getConfig();
   const url = new URL(request.url);
-  const pathname = url.pathname.replace(config.publicBasePath, "") || "/";
+  const pathname = stripBasePath(url.pathname, config.publicBasePath);
+
+  if (!pathname) {
+    return new Response("Not found", { status: 404 });
+  }
 
   if (pathname === "/api/health") {
     return jsonResponse({
       ok: true,
       claiming: Boolean(activeClaim) || claimState.claiming,
-      profiles: config.profiles.map((profile) => ({
-        id: profile.id,
-        label: profile.label,
-      })),
+      profileCount: config.profiles.length,
     });
+  }
+
+  if (
+    request.method === "POST" &&
+    (pathname === "/api/claim" || pathname === "/api/refresh")
+  ) {
+    const bearerAuthorized = isRefreshAuthorized(request, config);
+
+    if (!bearerAuthorized) {
+      if (!isAccessAuthorized(request, config)) {
+        return unauthorizedResponse();
+      }
+
+      if (!(await isCsrfAuthorized(request))) {
+        return jsonResponse({ ok: false, error: "Invalid CSRF token" }, 403);
+      }
+    }
+
+    const nextState = await runClaimNow(url.searchParams.get("profile") || "");
+    const accept = request.headers.get("accept") || "";
+
+    if (accept.includes("text/html")) {
+      return new Response(null, {
+        status: 303,
+        headers: { location: `${config.publicBasePath}/` },
+      });
+    }
+
+    return jsonResponse({ ok: true, state: nextState });
   }
 
   if (!isAccessAuthorized(request, config)) {
@@ -1044,26 +1147,19 @@ async function handleRequest(request: Request) {
     return jsonResponse(await getClaimState());
   }
 
-  if (
-    request.method === "POST" &&
-    (pathname === "/api/claim" || pathname === "/api/refresh")
-  ) {
-    if (!isRefreshAuthorized(request, config)) {
-      return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
-    }
-
-    const nextState = await runClaimNow(url.searchParams.get("profile") || "");
-    const accept = request.headers.get("accept") || "";
-
-    if (accept.includes("text/html")) {
-      return Response.redirect(`${url.origin}${config.publicBasePath}/`, 303);
-    }
-
-    return jsonResponse({ ok: true, state: nextState });
-  }
-
   if (request.method === "GET" && pathname.startsWith("/assets/")) {
-    const filename = decodeURIComponent(pathname.slice("/assets/".length));
+    let filename: string;
+
+    try {
+      filename = decodeURIComponent(pathname.slice("/assets/".length));
+    } catch {
+      return new Response("Not found", { status: 404 });
+    }
+
+    if (!config.profiles.some((profile) => profile.screenshotFilename === filename)) {
+      return new Response("Not found", { status: 404 });
+    }
+
     const path = assetPath(config, filename);
     const file = Bun.file(path);
 
@@ -1081,9 +1177,7 @@ async function handleRequest(request: Request) {
 
   if (request.method === "GET" && pathname === "/") {
     return new Response(renderPage(await getClaimState(), config), {
-      headers: {
-        "content-type": "text/html; charset=utf-8",
-      },
+      headers: htmlHeaders(),
     });
   }
 
