@@ -613,7 +613,7 @@ async function claimBrawlStarsReward(
   return withTimeout(
     (async () => {
       const browser = await chromium.launch({
-        headless: true,
+        headless: !process.env.DISPLAY,
       });
 
       try {
