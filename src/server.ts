@@ -689,6 +689,15 @@ async function collectOffers(page: Page) {
   return offers.flat();
 }
 
+function usesDefaultRewardSelectors(selectors: string[]) {
+  return (
+    selectors.length === DEFAULT_REWARD_SELECTORS.length &&
+    selectors.every(
+      (selector, index) => selector === DEFAULT_REWARD_SELECTORS[index],
+    )
+  );
+}
+
 async function findRewardControl(page: Page, selectors: string[]) {
   const invalidSelectors: string[] = [];
   let validSelectorCount = 0;
@@ -719,13 +728,7 @@ async function findRewardControl(page: Page, selectors: string[]) {
     }
   }
 
-  const usesDefaultSelectors =
-    selectors.length === DEFAULT_REWARD_SELECTORS.length &&
-    selectors.every(
-      (selector, index) => selector === DEFAULT_REWARD_SELECTORS[index],
-    );
-
-  if (usesDefaultSelectors) {
+  if (usesDefaultRewardSelectors(selectors)) {
     return undefined;
   }
 
@@ -909,7 +912,11 @@ async function claimWithPage({
     throw new Error(`Supercell Store returned an unusable page: ${storeError}`);
   }
 
-  const rewardControl = loggedOut
+  const shouldFindRewardControl =
+    !loggedOut &&
+    (!usesDefaultRewardSelectors(config.rewardSelectors) ||
+      /\b(?:claim|collect)\b/i.test(beforeText));
+  const rewardControl = !shouldFindRewardControl
     ? undefined
     : (onStage("finding a reward control"),
       await findRewardControl(page, config.rewardSelectors));
