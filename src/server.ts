@@ -762,16 +762,18 @@ function claimMutationEvidence(
   responseUrl: string,
   status: number,
 ) {
+  const url = new URL(responseUrl);
+  const claimEndpoint =
+    /(?:^|[-_/.])(?:claim|collect|redeem|reward|purchase|order)(?:[-_/.]|$)/i;
+
   if (
     method === "GET" ||
     status < 200 ||
     status >= 300 ||
-    !/(?:claim|collect|redeem|reward|purchase|order)/i.test(responseUrl)
+    !claimEndpoint.test(url.pathname)
   ) {
     return undefined;
   }
-
-  const url = new URL(responseUrl);
 
   return `${method} ${url.origin}${url.pathname} returned ${status}`;
 }
