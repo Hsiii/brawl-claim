@@ -688,10 +688,14 @@ async function findRewardControl(page: Page, selectors: string[]) {
   let validSelectorCount = 0;
 
   for (const frame of page.frames()) {
-    const controls = frame.locator("button,[role='button']");
-    const matchIndex = await controls
-      .evaluateAll((elements) =>
-        elements.slice(0, 100).findIndex((element) => {
+    const matched = await frame
+      .evaluate(() => {
+        const marker = "data-brawlclaim-reward";
+        const elements = document.querySelectorAll("button,[role='button']");
+
+        document.querySelector(`[${marker}]`)?.removeAttribute(marker);
+
+        const control = Array.from(elements).slice(0, 100).find((element) => {
           const control = element as HTMLButtonElement;
           const label = (element.textContent || "").replace(/\s+/g, " ").trim();
 
@@ -701,12 +705,19 @@ async function findRewardControl(page: Page, selectors: string[]) {
               !control.disabled &&
               element.getAttribute("aria-disabled") !== "true",
           );
-        }),
-      )
-      .catch(() => -1);
+        });
 
-    if (matchIndex >= 0) {
-      return { locator: controls.nth(matchIndex), selector: "Claim/Collect control" };
+        control?.setAttribute(marker, "true");
+
+        return Boolean(control);
+      })
+      .catch(() => false);
+
+    if (matched) {
+      return {
+        locator: frame.locator("[data-brawlclaim-reward='true']"),
+        selector: "Claim/Collect control",
+      };
     }
   }
 
