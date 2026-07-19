@@ -34,6 +34,12 @@ const CLAIM_VERIFICATION_TIMEOUT_MS = 20_000;
 const DEFAULT_CLAIM_TIMEOUT_MS = 180_000;
 const VIEWPORT_WIDTH = 1440;
 const VIEWPORT_HEIGHT = 1000;
+const DEFAULT_REWARD_SELECTORS = [
+  'button:has-text("Claim")',
+  'button:has-text("Collect")',
+  '[role="button"]:has-text("Claim")',
+  '[role="button"]:has-text("Collect")',
+];
 const STATE_FILE = "claim.json";
 const LOCK_FILE = "claim.lock";
 const DEFAULT_PROFILE_ID = "me";
@@ -278,7 +284,7 @@ function getConfig(): AppConfig {
     refreshToken: readEnv("BRAWL_STARS_CLAIMER_REFRESH_TOKEN"),
     rewardSelectors: (
       readEnv("BRAWL_STARS_CLAIMER_REWARD_SELECTORS") ||
-      'button:has-text("Claim"),button:has-text("Collect"),[role="button"]:has-text("Claim"),[role="button"]:has-text("Collect")'
+      DEFAULT_REWARD_SELECTORS.join(",")
     )
       .split(",")
       .map((selector) => selector.trim())
@@ -719,6 +725,16 @@ async function findRewardControl(page: Page, selectors: string[]) {
         selector: "Claim/Collect control",
       };
     }
+  }
+
+  const usesDefaultSelectors =
+    selectors.length === DEFAULT_REWARD_SELECTORS.length &&
+    selectors.every(
+      (selector, index) => selector === DEFAULT_REWARD_SELECTORS[index],
+    );
+
+  if (usesDefaultSelectors) {
+    return undefined;
   }
 
   for (const selector of selectors) {
