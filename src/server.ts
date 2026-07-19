@@ -651,14 +651,23 @@ async function frameBodyText(frame: Frame) {
   return frame
     .locator("body")
     .innerText({ timeout: ACTION_TIMEOUT_MS })
-    .then(normalizeStoreText)
     .catch(() => "");
 }
 
+async function storeBodyRawText(page: Page) {
+  return (await Promise.all(page.frames().map(frameBodyText)))
+    .filter(Boolean)
+    .join("\n");
+}
+
 async function storeBodyText(page: Page) {
-  return normalizeStoreText(
-    (await Promise.all(page.frames().map(frameBodyText))).filter(Boolean).join(" "),
-  );
+  return normalizeStoreText(await storeBodyRawText(page));
+}
+
+function hasDefaultRewardLabel(rawText: string) {
+  return rawText
+    .split(/\r?\n/)
+    .some((line) => /^(?:claim|collect)$/i.test(normalizeStoreText(line)));
 }
 
 async function collectOffers(page: Page) {
@@ -901,7 +910,8 @@ async function claimWithPage({
   onStage("navigating to the Supercell Store");
   await gotoStore(page);
   onStage("reading the Store page");
-  const beforeText = await storeBodyText(page);
+  const beforeRawText = await storeBodyRawText(page);
+  const beforeText = normalizeStoreText(beforeRawText);
   onStage("checking the login state");
   const loggedOut = await hasLoginPrompt(page, beforeText);
   const storeError = beforeText.match(
@@ -915,7 +925,7 @@ async function claimWithPage({
   const shouldFindRewardControl =
     !loggedOut &&
     (!usesDefaultRewardSelectors(config.rewardSelectors) ||
-      /\b(?:claim|collect)\b/i.test(beforeText));
+      hasDefaultRewardLabel(beforeRawText));
   const rewardControl = !shouldFindRewardControl
     ? undefined
     : (onStage("finding a reward control"),
