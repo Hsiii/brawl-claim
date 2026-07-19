@@ -687,6 +687,29 @@ async function findRewardControl(page: Page, selectors: string[]) {
   const invalidSelectors: string[] = [];
   let validSelectorCount = 0;
 
+  for (const frame of page.frames()) {
+    const controls = frame.locator("button,[role='button']");
+    const matchIndex = await controls
+      .evaluateAll((elements) =>
+        elements.slice(0, 100).findIndex((element) => {
+          const control = element as HTMLButtonElement;
+          const label = (element.textContent || "").replace(/\s+/g, " ").trim();
+
+          return Boolean(
+            /\b(?:claim|collect)\b/i.test(label) &&
+              !element.closest("[hidden],[aria-hidden='true']") &&
+              !control.disabled &&
+              element.getAttribute("aria-disabled") !== "true",
+          );
+        }),
+      )
+      .catch(() => -1);
+
+    if (matchIndex >= 0) {
+      return { locator: controls.nth(matchIndex), selector: "Claim/Collect control" };
+    }
+  }
+
   for (const selector of selectors) {
     for (const frame of page.frames()) {
       try {
