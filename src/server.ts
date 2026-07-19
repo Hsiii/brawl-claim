@@ -689,15 +689,23 @@ async function findRewardControl(page: Page, selectors: string[]) {
     for (const frame of page.frames()) {
       try {
         const matches = frame.locator(selector);
-        const count = Math.min(await matches.count(), 20);
+        const matchIndex = await matches.evaluateAll((elements) =>
+          elements.slice(0, 20).findIndex((element) => {
+            const control = element as HTMLButtonElement;
+            const style = getComputedStyle(element);
+
+            return Boolean(
+              element.getClientRects().length > 0 &&
+                style.visibility !== "hidden" &&
+                !control.disabled &&
+                element.getAttribute("aria-disabled") !== "true",
+            );
+          }),
+        );
         validSelectorCount += 1;
 
-        for (let index = 0; index < count; index += 1) {
-          const candidate = matches.nth(index);
-
-          if ((await candidate.isVisible()) && (await candidate.isEnabled())) {
-            return { locator: candidate, selector };
-          }
+        if (matchIndex >= 0) {
+          return { locator: matches.nth(matchIndex), selector };
         }
       } catch {
         invalidSelectors.push(selector);
@@ -721,23 +729,34 @@ async function hasLoginPrompt(page: Page, bodyText: string) {
   }
 
   for (const frame of page.frames()) {
-    const controls = frame.locator("button,[role='button'],a");
-    const count = Math.min(await controls.count().catch(() => 0), 100);
+    const labels = await frame
+      .locator("button,[role='button'],a")
+      .evaluateAll((elements) =>
+        elements.slice(0, 100).flatMap((element) => {
+          const style = getComputedStyle(element);
 
-    for (let index = 0; index < count; index += 1) {
-      const control = controls.nth(index);
+          if (
+            element.getClientRects().length === 0 ||
+            style.visibility === "hidden"
+          ) {
+            return [];
+          }
 
-      if (!(await control.isVisible().catch(() => false))) {
-        continue;
-      }
+          return [
+            (
+              (element as HTMLElement).innerText ||
+              element.getAttribute("aria-label") ||
+              ""
+            )
+              .replace(/\s+/g, " ")
+              .trim(),
+          ];
+        }),
+      )
+      .catch(() => []);
 
-      const label = normalizeStoreText(
-        await control.innerText({ timeout: ACTION_TIMEOUT_MS }).catch(() => ""),
-      );
-
-      if (/^(?:log|sign) in$/i.test(label)) {
-        return true;
-      }
+    if (labels.some((label) => /^(?:log|sign) in$/i.test(label))) {
+      return true;
     }
   }
 
