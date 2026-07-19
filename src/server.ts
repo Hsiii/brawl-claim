@@ -712,28 +712,16 @@ async function findRewardControl(page: Page, selectors: string[]) {
   let validSelectorCount = 0;
 
   for (const frame of page.frames()) {
-    const controls = frame.locator("button,[role='button']");
-    const matchIndex = await controls
-      .evaluateAll((elements) =>
-        elements.slice(0, 100).findIndex((element) => {
-          const control = element as HTMLButtonElement;
-          const label = (element.textContent || "").replace(/\s+/g, " ").trim();
+    for (const label of ["Claim", "Collect"]) {
+      const locator = frame.getByRole("button", { exact: true, name: label }).first();
+      const visible = await locator
+        .waitFor({ state: "visible", timeout: ACTION_TIMEOUT_MS })
+        .then(() => true)
+        .catch(() => false);
 
-          return Boolean(
-            /\b(?:claim|collect)\b/i.test(label) &&
-              !element.closest("[hidden],[aria-hidden='true']") &&
-              !control.disabled &&
-              element.getAttribute("aria-disabled") !== "true",
-          );
-        }),
-      )
-      .catch(() => -1);
-
-    if (matchIndex >= 0) {
-      return {
-        locator: controls.nth(matchIndex),
-        selector: "Claim/Collect control",
-      };
+      if (visible) {
+        return { locator, selector: `${label} button` };
+      }
     }
   }
 
@@ -741,8 +729,8 @@ async function findRewardControl(page: Page, selectors: string[]) {
     return undefined;
   }
 
-  for (const selector of selectors) {
-    for (const frame of page.frames()) {
+  for (const frame of page.frames()) {
+    for (const selector of selectors) {
       try {
         const matches = frame.locator(selector);
         const matchIndex = await matches.evaluateAll((elements) =>
