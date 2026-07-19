@@ -546,12 +546,14 @@ async function acquireClaimLock(config = getConfig()) {
 async function withTimeout<T>(
   promise: Promise<T>,
   timeoutMs: number,
-  label: string,
+  label: string | (() => string),
 ) {
   let timeout: Timer | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeout = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+      const resolvedLabel = typeof label === "function" ? label() : label;
+
+      reject(new Error(`${resolvedLabel} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
 
@@ -843,16 +845,21 @@ async function verifyClaimClick({
 async function claimWithPage({
   config,
   hasAuthState,
+  onStage,
   page,
   profile,
 }: {
   config: AppConfig;
   hasAuthState: boolean;
+  onStage: (stage: string) => void;
   page: Page;
   profile: ClaimProfile;
 }): Promise<ClaimResult> {
+  onStage("navigating to the Supercell Store");
   await gotoStore(page);
+  onStage("reading the Store page");
   const beforeText = await storeBodyText(page);
+  onStage("checking the login state");
   const loggedOut = await hasLoginPrompt(page, beforeText);
   const storeError = beforeText.match(
     /(?:something went wrong|access denied|checking your browser|service unavailable)/i,
@@ -864,7 +871,8 @@ async function claimWithPage({
 
   const rewardControl = loggedOut
     ? undefined
-    : await findRewardControl(page, config.rewardSelectors);
+    : (onStage("finding a reward control"),
+      await findRewardControl(page, config.rewardSelectors));
   const loggedIn = Boolean(rewardControl) || !loggedOut;
   let claimed = false;
   let attempted = false;
@@ -897,7 +905,9 @@ async function claimWithPage({
     page.on("response", onResponse);
 
     try {
+      onStage("clicking the reward control");
       await rewardControl.locator.click({ timeout: ACTION_TIMEOUT_MS });
+      onStage("verifying the reward claim");
       const result = await verifyClaimClick({
         beforeText,
         locator: rewardControl.locator,
@@ -917,6 +927,7 @@ async function claimWithPage({
     }
   }
 
+  onStage("collecting visible offers");
   const seenOfferUrls = new Set<string>();
   const offers = (await collectOffers(page))
     .filter((offer) => {
@@ -932,6 +943,7 @@ async function claimWithPage({
       title: compactText(offer.title),
       url: offer.url,
     }));
+  onStage("capturing the Store screenshot");
   const imageUrl = await screenshotTarget({
     config,
     filename: profile.screenshotFilename,
@@ -978,13 +990,20 @@ async function claimBrawlStarsReward(
 ) {
   let browser: Browser | undefined;
   let context: BrowserContext | undefined;
+  let stage = "starting the browser";
+  const onStage = (nextStage: string) => {
+    stage = nextStage;
+    console.log(`[claim:${profile.id}] ${stage}`);
+  };
 
   try {
     return await withTimeout(
       (async () => {
+        onStage("starting the browser");
         browser = await chromium.launch({
           headless: !process.env.DISPLAY,
         });
+        onStage("loading the saved authentication state");
         const hasAuthState = await fileExists(profile.authStateFile);
         const contextOptions: Parameters<typeof browser.newContext>[0] = {
           viewport: {
@@ -997,6 +1016,7 @@ async function claimBrawlStarsReward(
           contextOptions.storageState = profile.authStateFile;
         }
 
+        onStage("creating the browser context");
         context = await browser.newContext(contextOptions);
         const page = await context.newPage();
 
@@ -1006,12 +1026,13 @@ async function claimBrawlStarsReward(
         return claimWithPage({
           config,
           hasAuthState,
+          onStage,
           page,
           profile,
         });
       })(),
       config.claimTimeoutMs,
-      `${APP_NAME} ${profile.label}`,
+      () => `${APP_NAME} ${profile.label} while ${stage}`,
     );
   } catch (error) {
     return errorResult(error, profile);
