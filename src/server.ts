@@ -694,11 +694,9 @@ async function findRewardControl(page: Page, selectors: string[]) {
         const matchIndex = await matches.evaluateAll((elements) =>
           elements.slice(0, 20).findIndex((element) => {
             const control = element as HTMLButtonElement;
-            const style = getComputedStyle(element);
 
             return Boolean(
-              element.getClientRects().length > 0 &&
-                style.visibility !== "hidden" &&
+              !element.closest("[hidden],[aria-hidden='true']") &&
                 !control.disabled &&
                 element.getAttribute("aria-disabled") !== "true",
             );
