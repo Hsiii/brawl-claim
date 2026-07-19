@@ -731,33 +731,33 @@ async function hasLoginPrompt(page: Page, bodyText: string) {
   }
 
   for (const frame of page.frames()) {
-    const labels = await frame
+    const loginPrompt = await frame
       .locator("button,[role='button'],a")
       .evaluateAll((elements) =>
-        elements.slice(0, 100).flatMap((element) => {
-          const style = getComputedStyle(element);
+        elements.slice(0, 100).some((element) => {
+          const label = (
+            element.textContent ||
+            element.getAttribute("aria-label") ||
+            ""
+          )
+            .replace(/\s+/g, " ")
+            .trim();
 
-          if (
-            element.getClientRects().length === 0 ||
-            style.visibility === "hidden"
-          ) {
-            return [];
+          if (!/^(?:log|sign) in$/i.test(label)) {
+            return false;
           }
 
-          return [
-            (
-              (element as HTMLElement).innerText ||
-              element.getAttribute("aria-label") ||
-              ""
-            )
-              .replace(/\s+/g, " ")
-              .trim(),
-          ];
+          const style = getComputedStyle(element);
+
+          return !(
+            element.getClientRects().length === 0 ||
+            style.visibility === "hidden"
+          );
         }),
       )
-      .catch(() => []);
+      .catch(() => false);
 
-    if (labels.some((label) => /^(?:log|sign) in$/i.test(label))) {
+    if (loginPrompt) {
       return true;
     }
   }
