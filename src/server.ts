@@ -24,10 +24,10 @@ const DEFAULT_PORT = 3100;
 const DEFAULT_DATA_DIR = ".data/brawl-claim";
 const DEFAULT_INTERVAL_MINUTES = 24 * 60;
 const ACTION_TIMEOUT_MS = 8_000;
-const NAVIGATION_TIMEOUT_MS = 60_000;
-const STORE_READY_TIMEOUT_MS = 75_000;
+const NAVIGATION_TIMEOUT_MS = 45_000;
+const STORE_READY_TIMEOUT_MS = 30_000;
 const STORE_STABILITY_MS = 2_000;
-const STORE_NAVIGATION_ATTEMPTS = 3;
+const STORE_NAVIGATION_ATTEMPTS = 2;
 const SCREENSHOT_TIMEOUT_MS = 8_000;
 const CLEANUP_TIMEOUT_MS = 15_000;
 const CLAIM_VERIFICATION_TIMEOUT_MS = 20_000;
@@ -601,9 +601,13 @@ async function gotoStore(page: Page) {
     }
   }
 
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Supercell Store did not become ready.");
+  const detail =
+    lastError instanceof Error ? ` ${lastError.message}` : "";
+
+  throw new Error(
+    `Supercell Store did not become ready after ${STORE_NAVIGATION_ATTEMPTS} attempts.${detail}`,
+    { cause: lastError },
+  );
 }
 
 async function screenshotTarget({
